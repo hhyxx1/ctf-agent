@@ -23,7 +23,8 @@ import signal
 import logging
 from typing import Dict, List
 
-from agent import Agent
+from agent import Agent, build_agent
+from slab_match_solver import _load_lessons
 from utils import tsec_api, load_tb_progress, save_tb_progress
 from config import config
 
@@ -154,7 +155,24 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
     addr_str = ", ".join(container_addrs)
     print(f"  容器地址: {addr_str}")
 
-    # 2. 构造题目描述
+    # 2. 构造题目描述（含同类题经验注入，省轮次）
+    # 题型从 unique_code 前缀推导（web_/crypto_/pwn_/misc_）
+    cat = (unique_code.split("_")[0] if "_" in unique_code else "unknown").lower()
+    lessons_hint = ""
+    try:
+        entry = _load_lessons().get(cat)
+        if entry:
+            parts = []
+            if entry.get("solved_paths"):
+                parts.append(f"此类题此前成功路径参考: {' → '.join(entry['solved_paths'][-1])}")
+            if entry.get("notes"):
+                parts.append(f"此类题经验笔记: {entry['notes']}")
+            if entry.get("failed", 0) > 0:
+                parts.append(f"⚠️ 此类题此前失败 {entry['failed']} 次，注意换思路")
+            if parts:
+                lessons_hint = "\n".join(parts) + "\n"
+    except Exception:
+        pass
     task = f"""请解以下 CTF 题目并提交 flag。
 
 题目唯一标识 (unique_code): {unique_code}
@@ -163,15 +181,18 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
 Flag 数量: {flag_count}
 靶场容器地址: {addr_str}
 
+## 同类题经验（沉淀自之前运行，方法论级）
+{lessons_hint if lessons_hint else '（无此前同类题经验）'}
+
 注意:
 - 靶场地址通过 VPN 直连访问
 - 这道题有 {flag_count} 个 flag，需要分别获取和提交
 - 找到 flag 后必须调用 submit_flag 提交，flag 格式一般为 flag{{...}}
 - 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
 
-    # 3. Agent 解题
+    # 3. Agent 解题（按题型分派子 Agent：专用 prompt + 工具子集 + 经验注入）
     print(f"\n[2/5] Agent 解题...")
-    agent = Agent()
+    agent = build_agent(cat)
     # 单题整体超时兜底：防止某一步（工具/LLM）意外卡死拖死整个评测
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(_challenge_timeout(diff))
