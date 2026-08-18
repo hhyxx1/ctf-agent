@@ -123,7 +123,7 @@ class Config:
     LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "90"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-    TOOL_TIMEOUT: int = int(os.getenv("TOOL_TIMEOUT", "120"))
+    TOOL_TIMEOUT: int = int(os.getenv("TOOL_TIMEOUT", "240"))
 
     # ── 运行控制 ──
     # 自启: 镜像启动后是否立即开始解题（托管模式必须为 true）
