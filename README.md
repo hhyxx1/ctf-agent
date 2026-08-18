@@ -1,78 +1,50 @@
-# CTF Agent 使用指南
+# CTF Agent
 
-## 两种运行模式
+一个通用的 CTF（夺旗赛）自动解题 Agent 框架，基于 **ReAct 循环**（推理→行动→观察）驱动大模型调用 33 个工具完成探测、利用、拿 flag 的完整流程。
 
-### 本地模式（开发调试）
+## 核心特性
+
+- **ReAct 主循环**：三阶段元策略（定类 → 套法 → 验证）+ 早停信号，避免无方向 trial-error
+- **33 个工具**：Web 漏洞挖掘、二进制分析、漏洞利用、多阶段渗透、云攻击、对抗规避、Crypto/编码、Forensics、通用 shell/python/文件
+- **反作弊层**：所有工具调用走统一入口，路径隔离 + 全量审计 + 作弊拦截（防止 Agent 读取跑分集源码/答案）
+- **方法论知识库**：内置 12 类 CTF 解题方法论（WAF 绕过/SpEL/SQLi/SSRF/IDOR/SSTI/CBC/JSFuck 等）
+- **模型无关**：OpenAI 兼容接口，默认 DeepSeek，可换任意兼容模型
+
+## 快速开始（本地模式）
+
 ```bash
 cd ctf_agent
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-# 编辑 .env 填入 DEEPSEEK_API_KEY
+
+# 配置环境变量
+cp .env.example .env
+# 编辑 .env：至少填 DEEPSEEK_API_KEY
+
+# 跑一个通用测试任务
 .venv/bin/python main.py test
 ```
 
-### 托管模式（TSecBench 平台）
-平台拉起 Docker 镜像，注入环境变量，Agent 自启解题。无需人工触发。
+## 如何接你的题目
 
----
+框架不绑定任何特定平台/跑分集。接入方式：
 
-## 托管模式部署步骤
-
-### 1. 本地先装 Docker
+### 方式一：直接用命令行给 Agent 单个题目
 ```bash
-sudo apt install -y docker.io
+.venv/bin/python main.py task "请解这道 CTF 题并提交 flag：<题目描述>"
 ```
 
-### 2. 构建镜像
-```bash
-cd ctf_agent
-sudo docker build -t tsecbench-agent:latest .
+### 方式二：实现一个 Target 适配器（推荐，可复用）
+```python
+class MyTarget:
+    def describe(self) -> str: ...        # 题目描述/提示
+    def start(self) -> str: ...           # 返回靶场入口（本地端口/URL）
+    def submit(self, flag: str) -> bool:  # 提交判定
 ```
+然后在主循环里循环：`describe → Agent 解题 → submit`。
 
-### 3. 本地模式评测（平台强制前置要求）
-
-平台要求：必须先完成本地模式评测、接入答题 API，再做托管。
-
-#### 3.1 在 tsecbench 平台创建"本地模式"跑分任务，拿到：
-- `BENCHMARK_TOKEN`
-- `BENCHMARK_BASE_URL`
-- 靶场 VPN 配置
-
-#### 3.2 本地跑（注入平台下发的 token）
-```bash
-export BENCHMARK_TOKEN=平台下发的token
-export BENCHMARK_BASE_URL=https://tsecbench.zc.tencent.com
-export DEEPSEEK_API_KEY=sk-你的deepseek-key
-export GATEWAY_MODE=off        # 本地模式不走网关
-.venv/bin/python main.py tsecbench-list    # 验证连通
-.venv/bin/python main.py tsecbench         # 跑完整解题
-```
-
-连 VPN 后，Agent 才能访问 container_addr。
-
-#### 3.3 本地调通后，导出镜像
-```bash
-sudo docker save tsecbench-agent:latest | gzip > agent.tar.gz
-```
-
-### 4. 托管模式上传
-
-在 tsecbench 平台「制作并上传 Docker 镹像」处上传 `agent.tar.gz`。
-
-### 5. 配置运行时环境变量
-
-在平台「运行时环境变量」处填入：
-```
-DEEPSEEK_API_KEY=sk-你的deepseek-key
-```
-
-`BENCHMARK_TOKEN` 和 `BENCHMARK_BASE_URL` 平台自动注入，不要填。
-
-### 6. 启托管评测
-
-平台拉取镜像 → 部署沙箱 → 容器启动 → entrypoint.sh 调 `python main.py auto` → Agent 自启解题。
-
----
+### 方式三：使用仓库内置的跑分集适配器（可选）
+`benchmark_runner.py` / `xben_runner.py` / `tsecbench_solver.py` 分别是 cybench / XBEN / 平台类评测的接入示例，可参考其题面准备与判分逻辑，改造成你自己的适配器。
 
 ## 工具一览（33 个）
 
@@ -88,43 +60,59 @@ DEEPSEEK_API_KEY=sk-你的deepseek-key
 | Forensics | analyze_file, steg_check |
 | 通用 | run_shell, run_python, read_file, write_file, list_dir, extract_flag, submit_flag |
 
----
-
 ## 关键文件
 
 ```
 ctf_agent/
-├── Dockerfile               # 托管镜像构建
-├── entrypoint.sh            # 托管模式启动脚本
-├── main.py                  # 入口（auto/本地命令）
-├── config.py                # 配置（网关逻辑、环境变量）
+├── main.py                  # 入口
+├── config.py                # 配置（环境变量、反作弊路径）
 ├── agent.py                 # ReAct Agent 主循环
-├── tsecbench_solver.py      # TSecBench 解题循环
-├── tools/                   # 33 个工具
-├── utils/tsecbench_api.py   # TSecBench API 对接
-├── knowledge/               # CTF 解题知识库
-└── .env                     # 本地模式配置（不上传）
+├── llm.py                   # LLM 封装（OpenAI 兼容）
+├── tools/                   # 33 个工具 + 反作弊层（base.py）
+├── utils/                   # 平台 API 封装（示例）、知识库
+├── knowledge/               # CTF 解题方法论知识库
+├── benchmark_runner.py      # cybench 接入示例（可选）
+├── xben_runner.py           # XBEN 接入示例（可选）
+├── tsecbench_solver.py      # 平台类评测接入示例（可选）
+├── .env.example             # 环境变量模板（复制为 .env 填写）
+└── requirements.txt
 ```
 
-## 大模型网关（托管必读）
+## 配置说明
 
-托管环境不能访公网。原 `https://api.deepseek.com` 自动转为 `http://api.deepseek.com.tsecbench.gw`。
+编辑 `.env`（参考 `.env.example`）：
 
-`config.py` 中 `_apply_gateway()` 的触发条件：
-- `GATEWAY_MODE=on/off/auto`
-- 或检测到 `BENCHMARK_TOKEN` 已注入（自动判定托管模式）
-- `auto` 模式下：有 token 就走网关，没 token 就走公网
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `DEEPSEEK_API_KEY` | ✅ | 大模型 API Key |
+| `DEEPSEEK_BASE_URL` | 可选 | OpenAI 兼容接口地址（默认 DeepSeek 官方） |
+| `DEEPSEEK_MODEL` | 可选 | 模型名（默认 deepseek-chat） |
+| `FORBIDDEN_PATHS` | 可选 | 禁止 Agent 访问的路径（JSON 列表），如你的跑分集源码/答案目录 |
+| `ALLOWED_WORKDIRS` | 可选 | 合法工作目录前缀（JSON 列表） |
+| `MAX_ITERATIONS` | 可选 | 单题最大推理轮次（默认 25） |
 
-## 审计注意
+### 反作弊配置
 
-托管全程网络流量和大模型对话会被审计/部分公开：
-- 不要在 prompt 或对话中塞敏感信息（API Key、私人数据）
-- `DEEPSEEK_API_KEY` 通过环境变量注入，不会进对话内容
-- 解题日志会落盘到 `output/`，但不会回传给 LLM
+框架默认只拦截通用答案目录（`metadata/solution` 等）。如果你要防止 Agent 读取某个目录（如你的题目源码/答案），在 `.env` 配置：
 
-## 超时守护
+```
+FORBIDDEN_PATHS=["/data/my-benchmark","/data/answers","metadata/solution"]
+ALLOWED_WORKDIRS=["/tmp/chal_"]
+```
 
-- 总时限 360min（平台硬限）
-- `config.py` 的 `TOTAL_TIMEOUT_SEC` 默认 21000s（350min），留 10min 兜底
-- `tsecbench_solver.py` 在剩余时间 < 3min 时停止开新题，尝试关闭活跃容器
-- 平台沙箱超时后会强杀进程，所以别指望能跑满 360min
+所有工具调用都会经过 `tools/base.py` 的反作弊检查：命中禁止路径即拦截并记入审计日志 `output/anti_cheat.log`。
+
+## 大模型网关（可选，托管环境专用）
+
+如果你的运行环境不能直连公网（例如某些隔离评测沙箱），可通过网关代理访问大模型：
+
+- `GATEWAY_MODE=off`：直连 `DEEPSEEK_BASE_URL`（默认）
+- `GATEWAY_MODE=open`：按 `config.py` 中的 `_apply_gateway()` 规则转换 URL（https→http、域名加网关后缀）
+
+本地开发保持 `GATEWAY_MODE=off` 即可。
+
+## 安全注意
+
+- **不要在 prompt 或对话中塞敏感信息**（API Key、私人数据）——大模型对话可能被记录
+- API Key 只通过环境变量注入，不进对话内容
+- 解题日志落盘到 `output/`，该目录已被 `.gitignore` 忽略，不会提交

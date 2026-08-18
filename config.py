@@ -2,17 +2,17 @@
 
 支持两种运行模式:
 1. 本地模式: 通过 .env 文件加载配置（开发调试用）
-2. 托管模式 (TSecBench): 平台注入环境变量，大模型走 .tsecbench.gw 网关
+2. 托管模式 (可选): 评测平台注入环境变量，大模型走 .tsecbench.gw 网关（示例）
 
-大模型网关规则 (托管模式):
+大模型网关规则 (托管模式, 可选):
 - 原域名加 .tsecbench.gw 后缀
 - https 改成 http
 - 示例: https://api.deepseek.com → http://api.deepseek.com.tsecbench.gw
 
-环境变量 (托管模式平台自动注入):
+环境变量 (平台类评测环境可选注入):
 - BENCHMARK_TOKEN: 答题 API 鉴权 token
 - BENCHMARK_BASE_URL: 答题 API 基地址
-- DEEPSEEK_API_KEY: 大模型 API key (需在平台"运行时环境变量"中配置)
+- DEEPSEEK_API_KEY: 大模型 API key
 """
 import os
 import json
