@@ -272,15 +272,29 @@ class Agent:
                 result_str = result_str[:3000] + "\n...[截断]...\n" + result_str[-2500:]
 
             # 检测 flag 提交
+            # 仅当 submit_flag 返回「提交成功」（真提交到平台）才视为完成；
+            # 返回「本地模式/失败」时不要设 submitted，让 Agent 继续解题
             if name == "submit_flag":
-                self.submitted = True
+                if "提交成功" in result_str or "correct" in str(result_str).lower():
+                    self.submitted = True
+                else:
+                    # 本地模式/失败：给 Agent 明确反馈，让它继续解题而不是空转
+                    logger.info("submit_flag 未真正提交成功，Agent 继续解题")
+                    result_str = result_str + (
+                        "\n\n【系统】submit_flag 未真正提交成功（本地模式/未配置比赛 API 或提交失败）。"
+                        "说明当前 flag 可能不是正确答案或未被平台接受。"
+                        "请继续深入解题：如果只是猜测/提取的 flag，务必通过漏洞利用确认拿到真实输出再提交；"
+                        "继续调用工具找真正的 flag，不要停止。"
+                    )
             if name == "extract_flag" and "找到" in result_str:
                 self.found_flag = True
-                # 找到 flag 后强制注入 submit_flag 提示（防 Agent 烧轮次不提交）
+                # 找到 flag 后提示提交，但明确"未成功则继续"（防 Agent 空转）
                 # 注意: 不能插入 user 消息（会破坏 deepseek tool_calls→tool 响应链顺序）
-                # 改为在 tool 响应 content 后追加提示，保持 assistant.tool_calls → tool 链完整
                 if not self.submitted:
-                    result_str = result_str + "\n\n【系统】extract_flag 已命中 flag，下一轮立即调用 submit_flag 提交收尾，不要再跑其他工具。"
+                    result_str = result_str + (
+                        "\n\n【系统】extract_flag 命中 flag 候选。下一步调用 submit_flag 提交；"
+                        "若返回本地模式/失败/错误，说明 flag 不对，继续解题验证真实 flag，不要停止。"
+                    )
 
             print(f"  📤 {result_str[:300]}{'...' if len(result_str) > 300 else ''}")
 
@@ -321,6 +335,7 @@ class Agent:
             print(f"📚 已检索到相关知识")
         print(f"{'='*60}\n")
 
+        no_tool_rounds = 0  # 连续无工具调用的轮次计数
         while self.iteration < config.MAX_ITERATIONS:
             self.iteration += 1
             print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
@@ -337,9 +352,18 @@ class Agent:
                 print(f"\n✅ Flag 已提交！")
                 break
 
-            # 检查是否 Agent 放弃了（连续两轮没调用工具）
-            if self.iteration > 2 and not self.messages[-1].get("tool_calls"):
-                if "无法" in result or "放弃" in result or "失败" in result:
+            # 放弃判定：必须连续 2 轮都没有工具调用（纯文本），且含明确放弃意图
+            # 才判定 Agent 卡住——避免单轮提到"失败/无法"就误放弃
+            if not self.messages[-1].get("tool_calls"):
+                no_tool_rounds += 1
+            else:
+                no_tool_rounds = 0
+            # 空转保护：连续 3 轮无工具调用（纯文本回复）直接 break，防止空转烧轮次
+            if no_tool_rounds >= 3:
+                print(f"\n⚠️ Agent 连续 {no_tool_rounds} 轮无工具调用，停止空转")
+                break
+            if no_tool_rounds >= 2 and self.iteration > 2:
+                if "无法" in result or "放弃" in result or "解不出来" in result:
                     print(f"\n⚠️ Agent 表示无法继续")
                     break
 

@@ -124,9 +124,15 @@ TSecBench (腾讯安全基准平台):
   python main.py tsecbench-list             仅列出题目
   python main.py tsecbench-status           查看解题进度
 
+AI Agent 平台 (slab-match / pro.dasctf.com):
+  python main.py slab                       运行 AI Agent 平台完整解题循环
+  python main.py slab-list                  仅列出题目
+
 配置 (编辑 .env 或由平台注入环境变量):
   BENCHMARK_BASE_URL=https://tsecbench.zc.tencent.com
   BENCHMARK_TOKEN=你的BENCHMARK_TOKEN
+  SLAB_HOST=https://pro.dasctf.com
+  SLAB_ACCESS_KEY=你的X-Agent-AccessKey
   LLM_API_KEY=sk-xxx
   GATEWAY_MODE=open        启用 .tsecbench.gw 大模型网关（托管必启）
 """)
@@ -153,6 +159,16 @@ TSecBench (腾讯安全基准平台):
         tb_list()
     elif cmd == "tsecbench-status":
         show_status()
+    elif cmd == "slab":
+        from slab_match_solver import run_slab
+        run_slab()
+    elif cmd == "slab-list":
+        from slab_match_solver import list_challenges
+        from utils.slab_match_api import SlabMatchAPI
+        api = SlabMatchAPI()
+        for ch in list_challenges(api):
+            mark = "✅" if ch.get("has_solved") else "⬜"
+            print(f"  {mark} id={ch['exercise_id']} [{ch.get('category','')}] {ch.get('name','')}")
     else:
         print(f"未知命令: {cmd}")
 

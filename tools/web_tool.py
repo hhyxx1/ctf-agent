@@ -49,6 +49,13 @@ def http_request(url: str, method: str = "GET", headers: dict = None,
                  body: str = "", timeout: int = 30,
                  follow_redirects: bool = True) -> str:
     """发送 HTTP 请求"""
+    # 结果缓存去重：GET 请求按 URL 去重，防止重复探测同一目标浪费轮次
+    from tools.base import check_exec_cache, store_exec_cache
+    if method.upper() == "GET":
+        cache_key = f"http:{method.upper()}:{url}"
+        cached = check_exec_cache(cache_key)
+        if cached:
+            return cached
     try:
         # 用 curl 执行，更通用、更好控制
         cmd = [
@@ -84,7 +91,11 @@ def http_request(url: str, method: str = "GET", headers: dict = None,
         if len(output) > 6000:
             output = output[:3000] + "\n...[截断]...\n" + output[-2500:]
 
-        return output.strip() or "[无输出]"
+        output = output.strip() or "[无输出]"
+        # 存入缓存（GET 成功结果）
+        if method.upper() == "GET" and not output.startswith("[HTTP"):
+            store_exec_cache(f"http:{method.upper()}:{url}", output[:1500])
+        return output
 
     except subprocess.TimeoutExpired:
         return f"[HTTP 请求超时，{timeout}s 限制]"

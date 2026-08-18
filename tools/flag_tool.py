@@ -78,9 +78,13 @@ def submit_flag(flag: str, challenge_id: str = "") -> str:
     from utils.competition_api import api
     result = api.submit_flag(flag, challenge_id)
 
+    # 本地模式优先判断：competition_api 未配置时返回 {"status":"local"}，
+    # 不能误判为提交成功（否则 Agent 会以为已提交而停止）
+    if isinstance(result, dict) and (
+        result.get("status") == "local" or "本地模式" in str(result)
+    ):
+        return f"[本地模式] flag 已记录: {flag}"
     if isinstance(result, dict) and "error" not in result:
         return f"[提交成功] {json.dumps(result, ensure_ascii=False)}"
-    elif isinstance(result, dict) and result.get("status") == "local":
-        return f"[本地模式] flag 已记录: {flag}"
     else:
         return f"[提交失败] {result}"

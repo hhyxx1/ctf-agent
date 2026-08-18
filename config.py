@@ -114,8 +114,12 @@ class Config:
         or os.getenv("COMPETITION_TOKEN", "")
     )
 
+    # ── AI Agent 平台（slab-match，X-Agent-AccessKey 认证）──
+    SLAB_HOST: str = os.getenv("SLAB_HOST", "")            # 平台主机，如 https://xxx.com
+    SLAB_ACCESS_KEY: str = os.getenv("SLAB_ACCESS_KEY", "")  # Agent 专用 AccessKey
+
     # ── Agent 行为 ──
-    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "25"))
+    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "500"))
     LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "90"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))

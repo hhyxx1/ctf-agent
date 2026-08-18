@@ -19,4 +19,13 @@ from tools.base import register_tool, run_cmd
 )
 def run_shell(command: str) -> str:
     """执行 shell 命令并返回输出（超时整组强杀，防 msfconsole/nc 挂死）"""
-    return run_cmd(command, timeout=config.TOOL_TIMEOUT)
+    # 结果缓存去重：完全相同命令去重（日志实测同一探测命令反复执行 10+ 次）
+    from tools.base import check_exec_cache, store_exec_cache
+    cache_key = f"shell:{command[:300]}"
+    cached = check_exec_cache(cache_key)
+    if cached:
+        return cached
+    result = run_cmd(command, timeout=config.TOOL_TIMEOUT)
+    if not result.startswith("[") and len(result) > 2:
+        store_exec_cache(cache_key, result[:1500])
+    return result

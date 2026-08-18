@@ -112,6 +112,25 @@ def register_tool(name, description, parameters):
     return decorator
 
 
+# ── 结果缓存去重：防止 Agent 重复探测同一目标浪费轮次（日志实测同一命令反复执行 10+ 次）──
+_EXEC_CACHE = {}
+_EXEC_CACHE_MAX = 300
+
+
+def check_exec_cache(key: str):
+    """查询执行缓存，命中返回缓存结果（已附加重复提示），未命中返回 None"""
+    if key in _EXEC_CACHE:
+        return f"[缓存命中] 此操作此前已执行过，结果与之前相同：\n{_EXEC_CACHE[key]}\n建议不要重复探测，换个方向。"
+    return None
+
+
+def store_exec_cache(key: str, result: str):
+    """存入执行缓存（超出上限时淘汰最旧）"""
+    if len(_EXEC_CACHE) >= _EXEC_CACHE_MAX:
+        _EXEC_CACHE.pop(next(iter(_EXEC_CACHE)))
+    _EXEC_CACHE[key] = result
+
+
 def get_tools_schema():
     """返回 OpenAI function calling 格式的工具列表"""
     return [
