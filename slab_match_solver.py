@@ -144,6 +144,14 @@ def _build_denied(e: Exception) -> bool:
     return any(w in s for w in ["数量", "销毁", "已达", "上限", "创建靶机"])
 
 
+def _try_recover_env(api: SlabMatchAPI, ex_id: int):
+    """尽力回收环境（每完成一题销毁一台，防止占满平台 3 台上限）；失败静默忽略"""
+    try:
+        api.recover_env(ex_id)
+    except Exception:
+        pass
+
+
 def _build_strategy_hint(name: str, desc: str, category: str) -> str:
     """按题目名/描述/分类注入专项解题思路（方法论级，不指向单题答案）"""
     text = f"{name} {desc} {category}".lower()
@@ -225,8 +233,9 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     name = ch.get("name", "")
     cat = ch.get("category", "")
 
-    # 跳过已通关
+    # 跳过已通关（回收环境：每完成一题销毁一台，防占满 3 台上限）
     if ex_id in progress["solved"] or ch.get("has_solved"):
+        _try_recover_env(api, ex_id)
         return {"status": "skipped", "exercise_id": ex_id}
 
     print(f"\n{'='*60}")
@@ -239,6 +248,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
         detail = api.get_exercise(ex_id)
     except Exception as e:
         logger.error(f"❌ 详情失败: {e}")
+        _try_recover_env(api, ex_id)
         progress["failed"].append(ex_id)
         _save_progress(progress)
         return {"status": "detail_failed", "exercise_id": ex_id, "error": str(e)}
@@ -248,6 +258,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     score = detail.get("score", "")
     has_solved = detail.get("hasSolved", False)
     if has_solved:
+        _try_recover_env(api, ex_id)
         progress["solved"].append(ex_id)
         _save_progress(progress)
         return {"status": "solved_before", "exercise_id": ex_id}
@@ -277,6 +288,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
                 detail = _wait_env_ready(api, ex_id)
             except Exception as e:
                 logger.error(f"❌ 环境启动失败: {e}")
+                _try_recover_env(api, ex_id)
                 progress["failed"].append(ex_id)
                 _save_progress(progress)
                 return {"status": "env_failed", "exercise_id": ex_id, "error": str(e)}
