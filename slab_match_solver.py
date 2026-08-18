@@ -468,28 +468,43 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 - 找到 flag 后必须调用 submit_flag 提交，flag 格式一般为 flag{{...}}
 - **不要读无关文件**（.env、tasks.json、output/ 等不是本题内容）
 - 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
-    print(f"\n[3/5] Agent 解题（超时 {CHALLENGE_TIMEOUT_SEC}s）...")
-    agent = build_agent(cat)  # 规则分派子 Agent（按题型专用 prompt + 工具子集，独立上下文）
-    result = agent.run(task, verbose=True)
+    # 已知难题（经验库 failed>0 且该题型有多方向）→ 开局直接并行（方案 B，不等单 agent）
+    lessons = _load_lessons()
+    entry = lessons.get((cat or "unknown").lower(), {})
+    hard = entry.get("failed", 0) > 0 and bool(DIRECTIONS.get((cat or "").lower()))
+
+    parallel_flags = []
+    if hard:
+        dirs = DIRECTIONS.get((cat or "").lower(), [])
+        print(f"\n  🔀 已知难题（同类此前失败 {entry['failed']} 次），开局 {len(dirs)} 方向并行...")
+        parallel_flags, pres = _parallel_solve(task, cat, max_rounds=40)
+        agent = None  # 难题开局并行，无单 agent
+        result = {"success": False, "flag_found": bool(parallel_flags)}
+        if parallel_flags:
+            print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
+        else:
+            print(f"  🔀 并行未找到 flag（方向结果: {[v.get('success') or v.get('error', '') for v in pres.values()]}）")
+    else:
+        print(f"\n[3/5] Agent 解题（超时 {CHALLENGE_TIMEOUT_SEC}s）...")
+        agent = build_agent(cat)  # 规则分派子 Agent（按题型专用 prompt + 工具子集，独立上下文）
+        result = agent.run(task, verbose=True)
+        # 多方向并行：单 Agent 未解出（无 success 无 flag）→ 复杂题切 2-3 方向并行打同一靶场
+        if not result.get("success") and not result.get("flag_found"):
+            dirs = DIRECTIONS.get((cat or "").lower(), [])
+            if dirs:
+                print(f"\n  🔀 单 Agent 未解出，启动多方向并行（{len(dirs)} 方向 × 40 轮）...")
+                parallel_flags, pres = _parallel_solve(task, cat, max_rounds=40)
+                if parallel_flags:
+                    print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
+                else:
+                    print(f"  🔀 并行未找到 flag（方向结果: {[v.get('success') or v.get('error', '') for v in pres.values()]}）")
     agent_success = result.get("success", False)
     final_msg = result.get("final_message", "")
-
-    # 多方向并行：单 Agent 未解出（无 success 无 flag）→ 复杂题切 2-3 方向并行打同一靶场
-    parallel_flags = []
-    if not result.get("success") and not result.get("flag_found"):
-        dirs = DIRECTIONS.get((cat or "").lower(), [])
-        if dirs:
-            print(f"\n  🔀 单 Agent 未解出，启动多方向并行（{len(dirs)} 方向 × 40 轮）...")
-            parallel_flags, pres = _parallel_solve(task, cat, max_rounds=40)
-            if parallel_flags:
-                print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
-            else:
-                print(f"  🔀 并行未找到 flag（方向结果: {[v.get('success') or v.get('error', '') for v in pres.values()]}）")
 
     # 4. 提取 flag 并提交
     # 优先：Agent 显式调用 submit_flag 工具的 flag（最可靠，不误抓示例）
     explicit_flags = set()
-    for m in agent.messages:
+    for m in (agent.messages if agent else []):
         for tc in m.get("tool_calls", []) or []:
             fn = (tc.get("function") or {}).get("name", "")
             if fn == "submit_flag":
