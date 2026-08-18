@@ -231,10 +231,17 @@ CATEGORY_PROMPTS = {
 }
 
 
-def build_agent(category: str = "", **kwargs):
-    """子 Agent 工厂：按题型生成专用 system_prompt + 工具子集（规则分派用，零额外 LLM）"""
+def build_agent(category: str = "", direction: str = "", **kwargs):
+    """子 Agent 工厂：按题型生成专用 system_prompt + 工具子集。
+
+    - category: 题型（web/pwn/crypto/misc），决定工具子集 + 题型聚焦 prompt
+    - direction: 附加解题方向（多方向并行用，如 "专注 tcache poisoning → free_hook"），
+      方法论语——让该子 Agent 只专注一个方向不跑偏
+    """
     cat = (category or "").lower()
     sys_prompt = SYSTEM_PROMPT + CATEGORY_PROMPTS.get(cat, "")
+    if direction:
+        sys_prompt += f"\n\n## 本次解题方向（专注此方向，不要跑偏）\n{direction}"
     return Agent(system_prompt=sys_prompt, category=cat, **kwargs)
 
 
@@ -349,7 +356,7 @@ class Agent:
 
         return "\n".join(results)
 
-    def run(self, task: str, verbose: bool = True) -> dict:
+    def run(self, task: str, verbose: bool = True, max_iterations: int = None) -> dict:
         """
         运行 Agent 解题
 
@@ -359,8 +366,11 @@ class Agent:
                 "flag_found": bool,    # 是否找到 flag
                 "iterations": int,     # 总共思考了多少轮
                 "final_message": str,  # Agent 最后说的话
+                "messages": list,      # 完整对话（多方向并行/经验提取用）
             }
         """
+        # 多方向并行时限制轮次（防止多个并行 agent 各跑满 MAX_ITERATIONS 烧 token）
+        iter_limit = max_iterations or config.MAX_ITERATIONS
         # 解题前先检索相关知识
         knowledge = search_knowledge(task)
         if knowledge:
@@ -379,7 +389,7 @@ class Agent:
         no_tool_rounds = 0  # 连续无工具调用的轮次计数
         no_progress_rounds = 0  # 连续调工具但未找到 flag 的轮次（无进展检测）
         no_progress_advised = False  # 是否已注入过换思路提示
-        while self.iteration < config.MAX_ITERATIONS:
+        while self.iteration < iter_limit:
             self.iteration += 1
             # 无进展检测（基于上一轮状态）：连续调工具但一直没找到 flag → 注入换思路提示
             if self.iteration > 3:

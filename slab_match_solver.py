@@ -173,6 +173,77 @@ def _try_recover_env(api: SlabMatchAPI, ex_id: int):
         pass
 
 
+# ── 复杂题多方向并行：题型 → 2-3 个解题方向（方法论语，多方向 agent 各打一个）──
+DIRECTIONS = {
+    "pwn": [
+        "专注 tcache poisoning：泄露 libc 后，edit 覆写 tcache 头 → free_hook/malloc_hook → 写入 system → 触发 free(/bin/sh) 拿 shell 读 flag",
+        "专注 fastbin attack / unsorted bin：覆写 malloc_hook/free_hook 或伪造 chunk，用 one_gadget/system 拿 shell 读 flag",
+        "专注堆风水 + 对象指针覆写：通过 UAF/堆重叠覆写对象字段使其指向 /flag 或控制流，直接读 flag 或 RCE",
+    ],
+    "web": [
+        "专注文件上传 → 触发执行：上传图片马/后缀绕过后，找 include/LFI 包含点或直接访问触发 PHP 执行读 flag",
+        "专注 LFI/文件读取：php://filter 读源码找漏洞 → 读 config/flag 文件；配合伪协议/日志包含",
+        "专注反序列化/POP 链：找 unserialize 入口 → php serialize 生成长度精确 payload → 触发 RCE 读 flag",
+    ],
+    "crypto": [
+        "专注 RSA：factordb/sympy 分解 n、共模/小指数/低加密指数攻击，解出明文 flag",
+        "专注编码套娃：base64/hex/rot/摩斯/URL 层层解码，找隐藏 flag",
+        "专注对称加密脚本审计：从加密脚本找弱密钥/IV/已知明文 → 解密得到 flag",
+    ],
+}
+
+
+def _parallel_solve(task: str, cat: str, max_rounds: int = 40) -> (list, dict):
+    """复杂题多方向并行：2-3 个方向子 agent 同时打同一靶场（共享 task 里的 target）。
+
+    返回 (找到的显式 flag 列表, 各方向结果 dict)——多方向并行提升复杂题解出率。
+    """
+    dirs = DIRECTIONS.get((cat or "").lower(), [])
+    if not dirs:
+        return [], {}
+    results = {}
+    flags = []
+    lock = threading.Lock()
+
+    def worker(direction: str, i: int):
+        try:
+            ag = build_agent(cat, direction=direction)
+            r = ag.run(task, verbose=False, max_iterations=max_rounds)
+            fs = set()
+            for m in ag.messages:
+                for tc in m.get("tool_calls", []) or []:
+                    fn = (tc.get("function") or {}).get("name", "")
+                    if fn == "submit_flag":
+                        try:
+                            args = json.loads((tc.get("function") or {}).get("arguments", "{}"))
+                            f = args.get("flag", "")
+                            if f:
+                                fs.add(f)
+                        except Exception:
+                            pass
+            with lock:
+                results[i] = {
+                    "direction": direction[:30],
+                    "success": r.get("success"),
+                    "flag_found": r.get("flag_found"),
+                    "iterations": r.get("iterations"),
+                }
+                flags.extend(fs)
+        except Exception as e:
+            with lock:
+                results[i] = {"direction": direction[:30], "error": str(e)}
+
+    threads = [
+        threading.Thread(target=worker, args=(d, i), daemon=True)
+        for i, d in enumerate(dirs[:3])
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return list(set(flags)), results
+
+
 def _build_strategy_hint(name: str, desc: str, category: str) -> str:
     """按题目名/描述/分类注入专项解题思路（方法论级，不指向单题答案）"""
     text = f"{name} {desc} {category}".lower()
@@ -395,6 +466,18 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     agent_success = result.get("success", False)
     final_msg = result.get("final_message", "")
 
+    # 多方向并行：单 Agent 未解出（无 success 无 flag）→ 复杂题切 2-3 方向并行打同一靶场
+    parallel_flags = []
+    if not result.get("success") and not result.get("flag_found"):
+        dirs = DIRECTIONS.get((cat or "").lower(), [])
+        if dirs:
+            print(f"\n  🔀 单 Agent 未解出，启动多方向并行（{len(dirs)} 方向 × 40 轮）...")
+            parallel_flags, pres = _parallel_solve(task, cat, max_rounds=40)
+            if parallel_flags:
+                print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
+            else:
+                print(f"  🔀 并行未找到 flag（方向结果: {[v.get('success') or v.get('error', '') for v in pres.values()]}）")
+
     # 4. 提取 flag 并提交
     # 优先：Agent 显式调用 submit_flag 工具的 flag（最可靠，不误抓示例）
     explicit_flags = set()
@@ -409,6 +492,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
                         explicit_flags.add(f)
                 except Exception:
                     pass
+    explicit_flags.update(parallel_flags)  # 合并并行方向找到的 flag
 
     # 兜底：只从 Agent 最终输出(final_message)正则提取——不再拼所有 messages 内容，
     # 因为 messages 里是工具结果/源码/注释，会被正则误抓成垃圾候选（如注释里的 "CTF{ 的子串..."）
