@@ -419,10 +419,10 @@ class Agent:
                 no_tool_rounds += 1
             else:
                 no_tool_rounds = 0
-            # 空转保护：连续 5 轮无工具调用（纯文本回复）才 break。
-            # 3 轮太敏感——LLM 偶发连续几轮纯文本（思考/格式波动）会被误杀；
+            # 空转保护：连续 10 轮无工具调用（纯文本回复）才 break。
+            # 阈值太敏感会误杀 LLM 偶发的纯文本思考轮次；
             # 明确的放弃意图仍由上方"放弃判定"（2 轮+放弃词）处理。
-            if no_tool_rounds >= 5:
+            if no_tool_rounds >= 10:
                 print(f"\n⚠️ Agent 连续 {no_tool_rounds} 轮无工具调用，停止空转")
                 break
             if no_tool_rounds >= 2 and self.iteration > 2:
