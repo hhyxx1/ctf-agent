@@ -53,6 +53,27 @@ def _save_progress(progress: Dict) -> None:
         json.dump(progress, f, ensure_ascii=False, indent=2)
 
 
+# ── 解题经验库（P1 经验沉淀 + P2 失败卡点；方法论级，不含单题答案/flag）──
+LESSONS_FILE = os.path.join(config.OUTPUT_DIR, "slab_lessons.json")
+
+
+def _load_lessons() -> Dict:
+    """读经验库: {category: {"solved_paths": [工具路径], "failed": 失败次数}}"""
+    if os.path.exists(LESSONS_FILE):
+        try:
+            with open(LESSONS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_lessons(lessons: Dict) -> None:
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    with open(LESSONS_FILE, "w") as f:
+        json.dump(lessons, f, ensure_ascii=False, indent=2)
+
+
 def list_challenges(api: SlabMatchAPI) -> List[Dict]:
     """拉题目列表，拍平成 [(exerciseId, name, 分类)] 列表（跳过未开放的题）"""
     groups = api.list_exercises()
@@ -326,6 +347,22 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 
     # 3. 构造题目描述（含专项思路注入，省轮次）
     strategy = _build_strategy_hint(name, desc, cat)
+    # 注入同类题经验（P1+P2：成功路径引导 + 失败提醒换思路）
+    lessons_hint = ""
+    try:
+        lessons = _load_lessons()
+        entry = lessons.get((cat or "unknown").lower())
+        if entry:
+            parts = []
+            paths = entry.get("solved_paths") or []
+            if paths:
+                parts.append(f"此类题此前成功路径参考: {' → '.join(paths[-1])}")
+            if entry.get("failed", 0) > 0:
+                parts.append(f"⚠️ 此类题此前失败 {entry['failed']} 次，注意换思路，避免重复踩坑")
+            if parts:
+                lessons_hint = "\n".join(parts) + "\n"
+    except Exception:
+        pass
     task = f"""请解以下 CTF 题目并提交 flag。
 
 题目 ID: {ex_id}
@@ -340,6 +377,9 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 
 ## 解题思路提示（按题目类型，方法论）
 {strategy if strategy else '（通用: 先探测入口, 再定向利用）'}
+
+## 同类题经验（沉淀自之前运行，方法论级）
+{lessons_hint if lessons_hint else '（无此前同类题经验）'}
 
 注意:
 - 靶场地址通过平台代理访问（HTTP 服务直接 curl / 探测）
@@ -465,6 +505,29 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
         # 提交的 flag 全错（或未提交）→ failed，下次运行会重试
         status = "failed"
         progress["failed"].append(ex_id)
+
+    # 7. 沉淀解题经验（P1+P2：方法论级工具路径，不含单题答案/flag）
+    try:
+        lessons = _load_lessons()
+        cat_key = (cat or "unknown").lower()
+        entry = lessons.setdefault(cat_key, {"solved_paths": [], "failed": 0})
+        if status in ("solved", "partial"):
+            path = []
+            for m in agent.messages:
+                for tc in m.get("tool_calls", []) or []:
+                    fn = (tc.get("function") or {}).get("name", "")
+                    if fn and fn not in path:
+                        path.append(fn)
+            path = path[:8]  # 保留关键路径
+            if path and path not in entry["solved_paths"]:
+                entry["solved_paths"].append(path)
+                entry["solved_paths"] = entry["solved_paths"][-5:]  # 每类保留最近 5 条
+                _save_lessons(lessons)
+        else:
+            entry["failed"] += 1
+            _save_lessons(lessons)
+    except Exception:
+        pass
 
     # 6. 回收环境（仅独占场景可回收；共享/非独占场景平台自动回收，跳过）
     ep_type = (detail.get("endpointType") or "").lower()
