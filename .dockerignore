@@ -1,0 +1,32 @@
+# 敏感配置（绝不进镜像）
+.env
+.env.local
+.env.*
+
+# Python 缓存和虚拟环境
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地输出和测试数据（沙箱里应从空状态开始）
+output/
+attachments/*
+!attachments/.gitkeep
+*.flag
+
+# Git 和 IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Docker 自身文件不需要进镜像（entrypoint.sh 必须保留，Dockerfile 要 COPY 它）
+Dockerfile
+.dockerignore
+
+# 文档和本地测试
+README.md
+tasks.json
+tests/
+resources/

@@ -1,0 +1,33 @@
+.env
+.env.local
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+output/
+attachments/*
+!attachments/.gitkeep
+*.flag
+
+# ── 敏感文件（密钥/证书/VPN/日志，绝不提交）──
+*.pem
+*.key
+*.p12
+*.jks
+*.ovpn
+*.crt
+*.log
+*.tar.gz
+
+# ── 跑分集数据（用户本地数据，不入库）──
+cybench/
+validation-benchmarks/
+benchmarks/
+
+# ── 本地解题残留（自动生成/下载产物，不入库）──
+f[0-9]-*/
+hydra.restore
+output_dec/
+tasks.json
