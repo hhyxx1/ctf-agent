@@ -131,8 +131,31 @@ def store_exec_cache(key: str, result: str):
     _EXEC_CACHE[key] = result
 
 
-def get_tools_schema():
-    """返回 OpenAI function calling 格式的工具列表"""
+# 题型工具映射（子 Agent 按题型优先生成；分类错时靠通用兜底解，不会无解）
+CATEGORY_TOOLS = {
+    "web": ["http_request", "dir_scan", "web_fingerprint", "sqli_scan", "vuln_scan",
+            "proxy_scan", "nmap_scan", "hydra_brute", "ssrf_metadata", "run_shell"],
+    "pwn": ["binary_analyze", "exploit_template", "rop_gadget_search", "vuln_pattern_scan",
+            "ghidra_decompile", "shellcode_encode", "msfvenom_payload", "run_python", "run_shell"],
+    "crypto": ["rsa_decrypt", "auto_decode", "encode_data", "run_python", "run_shell"],
+    "misc": ["steg_check", "analyze_file", "run_shell", "auto_decode", "encode_data"],
+}
+# 通用兜底工具：所有子 Agent 都有（run_shell 万能可解一切，分类错不无解）
+COMMON_TOOLS = ["run_shell", "read_file", "write_file", "http_request", "run_python",
+                "list_dir", "analyze_file", "extract_flag", "submit_flag"]
+
+
+def get_tools_schema(category: str = ""):
+    """返回 OpenAI function calling 格式的工具列表
+
+    - category 为空: 全量工具（兼容原有调用/父 Agent）
+    - category 有: 题型优先生成 + 通用兜底（分类错也能解——run_shell 万能兜底）
+    """
+    cat = (category or "").lower()
+    if cat in CATEGORY_TOOLS:
+        names = set(CATEGORY_TOOLS[cat]) | set(COMMON_TOOLS)
+    else:
+        names = None  # 全量
     return [
         {
             "type": "function",
@@ -143,6 +166,7 @@ def get_tools_schema():
             }
         }
         for t in TOOL_REGISTRY.values()
+        if names is None or t["name"] in names
     ]
 
 

@@ -21,7 +21,7 @@ import threading
 import logging
 from typing import Dict, List
 
-from agent import Agent
+from agent import Agent, build_agent
 from config import config
 from utils.slab_match_api import SlabMatchAPI
 
@@ -162,6 +162,11 @@ def _build_strategy_hint(name: str, desc: str, category: str) -> str:
             "  → 覆盖: 伪造 tcache/fastbin chunk 或对象 vtable/函数指针 → 控制执行流(RCE) 或直接改 flag 指针读取\n"
             "  → 地址计算: 用 run_python 精确算 hex 偏移(LE 字节序), 差量(如对象间隔 0x140) 辅助堆风水\n"
             "  → 目标是拿 flag: 先泄露, 再 RCE 执行 cat /flag 或用 UAF 直接读 flag 内存\n"
+            "- **Pwn 提速要点（重要，避免单轮 60s+）**:\n"
+            "  → 每次 run_python 只测 ≤3 个变体(如 offset/extra 最多试 2-3 个), 不要 for 循环跑 7 个变体\n"
+            "  → socket recv 用 timeout=0.1~0.2s(不要 0.5s), 减少 recv_all 累积等待\n"
+            "  → 一次连接内完成多次交互(复用连接), 不要每个变体都重新 connect(重连很慢)\n"
+            "  → 先想清楚 payload 再执行, 用 run_python 调试逻辑, 确认关键地址后再打远程\n"
         )
     # Crypto
     if any(k in text for k in ["crypto", "rsa", "aes", "cipher", "加密"]) or category.lower() == "crypto":
@@ -295,7 +300,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 - **不要读无关文件**（.env、tasks.json、output/ 等不是本题内容）
 - 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
     print(f"\n[3/5] Agent 解题（超时 {CHALLENGE_TIMEOUT_SEC}s）...")
-    agent = Agent()
+    agent = build_agent(cat)  # 规则分派子 Agent（按题型专用 prompt + 工具子集，独立上下文）
     result = agent.run(task, verbose=True)
     agent_success = result.get("success", False)
     final_msg = result.get("final_message", "")

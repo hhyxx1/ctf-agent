@@ -218,15 +218,37 @@ SYSTEM_PROMPT = """你是一个专业的 CTF（夺旗赛）自动解题 Agent，
 """
 
 
+# 题型专用 system_prompt 补充（子 Agent 工厂用；分类仅供参考，避免分类错无解）
+CATEGORY_PROMPTS = {
+    "web": "\n\n## 题型聚焦（Web）\n专注于 Web 漏洞利用：源码泄露(.bak/.swp/www.zip)、文件上传(后缀/图片马+触发执行)、"
+           "反序列化(POP链)、LFI/php://filter、SSRF、SQLi。分类仅供参考——若发现实际是其他类型，用 run_shell 探索。",
+    "pwn": "\n\n## 题型聚焦（Pwn）\n专注于二进制利用：栈溢出/格式化字符串/堆UAF(见方法) → 泄露地址 → RCE。"
+           "注意单轮提速（≤3 变体、socket timeout 收紧）。分类仅供参考——若发现实际是其他类型，用 run_shell 探索。",
+    "crypto": "\n\n## 题型聚焦（Crypto）\n专注于密码学：RSA(弱密钥/共模/小指数)、AES、编码套娃(base64/hex/rot)、"
+              "从加密脚本源码找算法。分类仅供参考——若发现实际是其他类型，用 run_shell 探索。",
+    "misc": "\n\n## 题型聚焦（Misc/取证）\n专注于：附件分析(file/steg/流量pcap/压缩包)、隐写、编码解码、"
+            "解压套娃。分类仅供参考——若发现实际是其他类型，用 run_shell 探索。",
+}
+
+
+def build_agent(category: str = "", **kwargs):
+    """子 Agent 工厂：按题型生成专用 system_prompt + 工具子集（规则分派用，零额外 LLM）"""
+    cat = (category or "").lower()
+    sys_prompt = SYSTEM_PROMPT + CATEGORY_PROMPTS.get(cat, "")
+    return Agent(system_prompt=sys_prompt, category=cat, **kwargs)
+
+
 class Agent:
-    def __init__(self, system_prompt: str = SYSTEM_PROMPT):
+    def __init__(self, system_prompt: str = SYSTEM_PROMPT, category: str = ""):
         # KV Cache 友好：system prompt 必须是静态常量，工具注册也静态生成（勿动态注入时间/状态）。
         # 动态信息（时间戳/变色内容）只能作为新消息 append 到 messages 末尾，绝不改 system prompt。
         self.messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         self.iteration = 0
-        self.tools = get_tools_schema()
+        # 子 Agent：按题型过滤工具子集（题型优先生成 + 通用兜底 run_shell 等，分类错也能解）
+        self.tools = get_tools_schema(category)
         self.found_flag = False
         self.submitted = False
+        self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
 
     def _compress_history(self, threshold: int = 40, keep_tail: int = 10, max_len: int = 400):
         """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果截断为摘要。
@@ -355,8 +377,26 @@ class Agent:
         print(f"{'='*60}\n")
 
         no_tool_rounds = 0  # 连续无工具调用的轮次计数
+        no_progress_rounds = 0  # 连续调工具但未找到 flag 的轮次（无进展检测）
+        no_progress_advised = False  # 是否已注入过换思路提示
         while self.iteration < config.MAX_ITERATIONS:
             self.iteration += 1
+            # 无进展检测（基于上一轮状态）：连续调工具但一直没找到 flag → 注入换思路提示
+            if self.iteration > 3:
+                if self._last_has_tool_calls and not self.found_flag:
+                    no_progress_rounds += 1
+                elif self.found_flag:
+                    no_progress_rounds = 0
+                if no_progress_rounds >= 25 and not no_progress_advised:
+                    no_progress_advised = True
+                    no_progress_rounds = 0
+                    self.messages.append({
+                        "role": "user",
+                        "content": "【系统提示】已连续多轮调用工具但未找到 flag。请重新审视方向，避免重复尝试："
+                                   "①确认漏洞入口是否正确（读源码/分析协议/检查附件）"
+                                   "②是否漏了特殊参数或入口 ③换一个利用思路。继续解题。",
+                    })
+                    print("  ⚠️ 无进展 25 轮，已注入换思路提示")
             print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
 
             try:
