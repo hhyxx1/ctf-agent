@@ -1,0 +1,57 @@
+{
+  "crypto": {
+    "solved_paths": [
+      [
+        "rsa_decrypt",
+        "run_python",
+        "extract_flag",
+        "submit_flag"
+      ],
+      [
+        "list_dir",
+        "run_shell",
+        "read_file",
+        "run_python",
+        "extract_flag",
+        "submit_flag"
+      ]
+    ],
+    "failed": 1
+  },
+  "pwn": {
+    "solved_paths": [
+      [
+        "run_shell",
+        "run_python",
+        "http_request",
+        "read_file",
+        "binary_analyze",
+        "ghidra_decompile",
+        "write_file",
+        "extract_flag"
+      ],
+      [
+        "run_shell",
+        "write_file",
+        "run_python",
+        "extract_flag"
+      ]
+    ],
+    "failed": 3,
+    "notes": "堆UAF题(easy_uaf/购物车/教务管理类)经验：交互协议通常 4 操作——创建对象(含ID/名称/多个数值字段)、创建关联对象(含ID/名称/Style枚举)、删除关联对象、打印/查看(参数为两个ID)。UAF触发：删除关联对象后其指针未清空，打印操作读取 freed chunk。泄露：delete 多个对象后打印，从 freed chunk 泄露 tcache/fastbin fd 指针(小端，u32)。覆盖：泄露拿到堆地址后，伪造 chunk 或覆写函数指针/返回地址实现 RCE。卡点提醒：泄露后覆盖环节容易卡——试 tcache poisoning、fastbin attack、覆写对象字段使其指向 /flag。\n【log10 实战补充(easy_uaf 类)】拿到 system PLT 地址后可走'UAF 覆写函数指针'链：create 对象(如 person 0) → create 关联对象(subject 0) → delete subject 0 触发 UAF → 再 create 一个对象(如 person 1) reclaim freed chunk → 把 chunk 内函数指针字段(如 offset 0x20)覆写为 system 地址，name 字段写 /bin/sh → 调用打印/查看操作触发 system('/bin/sh') 拿 shell → 读 flag。注意：先本地(process+libc)验证 exploit 逻辑，确认泄露/覆写正确后，再直接用 remote 打靶场端口(portMappings 的 proxy 端口)。"
+  },
+  "misc": {
+    "solved_paths": [
+      [
+        "list_dir",
+        "read_file",
+        "analyze_file",
+        "run_shell",
+        "run_python",
+        "extract_flag",
+        "submit_flag"
+      ]
+    ],
+    "failed": 0
+  }
+}

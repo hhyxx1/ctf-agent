@@ -6,7 +6,8 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
-output/
+output/*
+!output/slab_lessons.json
 attachments/*
 !attachments/.gitkeep
 *.flag
