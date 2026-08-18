@@ -248,6 +248,8 @@ class Agent:
         response = llm.chat(self.messages, tools=self.tools)
         choice = response.choices[0]
         msg = choice.message
+        # 记录本轮是否调用了工具（空转判定用——不能看 messages[-1]，调工具后末尾是 tool 结果消息）
+        self._last_has_tool_calls = bool(msg.tool_calls)
 
         # 把 assistant 消息加入历史（包括 tool_calls）
         assistant_msg = {"role": "assistant", "content": msg.content or ""}
@@ -371,7 +373,9 @@ class Agent:
 
             # 放弃判定：必须连续 2 轮都没有工具调用（纯文本），且含明确放弃意图
             # 才判定 Agent 卡住——避免单轮提到"失败/无法"就误放弃
-            if not self.messages[-1].get("tool_calls"):
+            # 注意: 用 _last_has_tool_calls（本轮 LLM 是否返回 tool_calls），
+            # 不能用 messages[-1]（调工具后末尾是 tool 结果消息，无 tool_calls 字段会误判）
+            if not self._last_has_tool_calls:
                 no_tool_rounds += 1
             else:
                 no_tool_rounds = 0

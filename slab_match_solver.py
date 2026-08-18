@@ -229,11 +229,31 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
     target = _extract_endpoint_target(detail)
     print(f"  目标地址: {target or '(无端点)'}")
 
-    # 附件信息
+    # 附件信息：下载 attachment.files[].url 到本地工作目录，Agent 直接用 read_file/file 处理
+    import os as _os, requests as _requests
+    att_dir = _os.path.join(config.OUTPUT_DIR, "attachments", str(ex_id))
+    _os.makedirs(att_dir, exist_ok=True)
     att_files = []
     att = detail.get("attachment") or {}
     for f in att.get("files") or []:
-        att_files.append(f"{f.get('name')} ({f.get('url','')})")
+        fname = f.get("name", "attachment")
+        furl = f.get("url", "")
+        fpath = _os.path.join(att_dir, fname)
+        if furl and not _os.path.exists(fpath):
+            try:
+                r = _requests.get(furl, timeout=30)
+                if r.status_code == 200:
+                    with open(fpath, "wb") as fh:
+                        fh.write(r.content)
+                    print(f"  📎 附件已下载: {fpath} ({len(r.content)} bytes)")
+                else:
+                    print(f"  ⚠️ 附件下载失败 HTTP {r.status_code}: {furl}")
+            except Exception as e:
+                print(f"  ⚠️ 附件下载异常: {e}")
+        if _os.path.exists(fpath):
+            att_files.append(f"{fname} -> {fpath}")
+        elif furl:
+            att_files.append(f"{fname} ({furl})")
 
     # 3. 构造题目描述（含专项思路注入，省轮次）
     strategy = _build_strategy_hint(name, desc, cat)
@@ -254,7 +274,9 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
 
 注意:
 - 靶场地址通过平台代理访问（HTTP 服务直接 curl / 探测）
+- **附件已下载到本地路径**（见上方"附件:"里的 -> 路径），用 read_file/file/analyze_file 直接处理本地文件
 - 找到 flag 后必须调用 submit_flag 提交，flag 格式一般为 flag{{...}}
+- **不要读无关文件**（.env、tasks.json、output/ 等不是本题内容）
 - 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
     print(f"\n[3/5] Agent 解题（超时 {CHALLENGE_TIMEOUT_SEC}s）...")
     agent = Agent()
@@ -302,7 +324,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
         # 排除: 占位符 / 含"..." / 含 example / 含换行/代码特征 / 含中文注释词 / 超长(>100)
         if f in PLACEHOLDERS or "..." in f or "example" in fl:
             continue
-        if "\n" in f or "\\" in f or "print(" in f or "{" in f.replace("flag{", "", 1):
+        if "\n" in f or "\\" in f or "print(" in f or f.count("{") > 1:
             continue
         if any(w in f for w in ["子串", "误匹配", "非词边界", "注释", "源码"]):
             continue
