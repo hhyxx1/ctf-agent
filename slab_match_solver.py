@@ -96,6 +96,7 @@ def _extract_endpoint_target(exercise: Dict) -> str:
 
 def _wait_env_ready(api: SlabMatchAPI, exercise_id: int) -> Dict:
     """启动环境后轮询详情直到 isNeedCheck=false 且 endpoints 可用（最长 MAX_ENV_POLL*10s）"""
+    empty_rounds = 0  # isNeedCheck=False 但 endpoints 空的连续次数（环境异常信号）
     for i in range(MAX_ENV_POLL):
         time.sleep(10)
         try:
@@ -107,6 +108,16 @@ def _wait_env_ready(api: SlabMatchAPI, exercise_id: int) -> Dict:
         has_endpoint = bool(d.get("endpoints"))
         if not need_check and has_endpoint:
             return d
+        # 环境异常：isNeedCheck=False 但 endpoints 空——平台认为不再构建却无端点，
+        # 等再久也不会好（实测 8min+ 无变化），连续 5 次（50s）即放弃，不空等 20min
+        if not need_check and not has_endpoint:
+            empty_rounds += 1
+            if empty_rounds >= 5:
+                raise TimeoutError(
+                    f"exercise {exercise_id} 环境异常: isNeedCheck=False 但 endpoints 空（平台构建问题），{empty_rounds*10}s 无变化"
+                )
+        else:
+            empty_rounds = 0
         logger.info(f"环境准备中... ({(i+1)}/{MAX_ENV_POLL}, isNeedCheck={need_check})")
     raise TimeoutError(f"exercise {exercise_id} 环境 {MAX_ENV_POLL*10}s 未就绪")
 
