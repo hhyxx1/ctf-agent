@@ -150,10 +150,18 @@ def _build_strategy_hint(name: str, desc: str, category: str) -> str:
             "  → 若 view.php 有 LFI(file 参数): 用 LFI include 上传的图片马文件路径触发执行\n"
         )
     # Pwn
-    if any(k in text for k in ["pwn", "栈", "溢出", "fmt", "heap"]) or category.lower() == "pwn":
+    if any(k in text for k in ["pwn", "栈", "溢出", "fmt", "heap", "uaf"]) or category.lower() == "pwn":
         hints.append(
             "- Pwn 题: 先确定题目类型(栈溢出/格式化字符串/堆), 用 checksec 看保护\n"
             "  → 本地/远程连接后分析交互协议, 构造 exploit(pwntools)\n"
+            "- **堆 UAF 题专项（shopping 类购物车/商品管理题常用）**: add/remove/edit 操作管理对象,\n"
+            "  remove 后未清指针 → UAF。利用链:\n"
+            "  → 先摸清 add(对象大小/字段布局)、remove(是否置 NULL)、edit(读写原语) 的交互协议\n"
+            "  → 触发 UAF: add 两个对象 A/B, remove A 再通过 B 的悬空指针读写 A 的 freed chunk\n"
+            "  → 泄露: 用 UAF 读 freed chunk 里的地址(如 tcache/fastbin fd 指针、unsorted bin main_arena) 拿 libc/堆基址\n"
+            "  → 覆盖: 伪造 tcache/fastbin chunk 或对象 vtable/函数指针 → 控制执行流(RCE) 或直接改 flag 指针读取\n"
+            "  → 地址计算: 用 run_python 精确算 hex 偏移(LE 字节序), 差量(如对象间隔 0x140) 辅助堆风水\n"
+            "  → 目标是拿 flag: 先泄露, 再 RCE 执行 cat /flag 或用 UAF 直接读 flag 内存\n"
         )
     # Crypto
     if any(k in text for k in ["crypto", "rsa", "aes", "cipher", "加密"]) or category.lower() == "crypto":
