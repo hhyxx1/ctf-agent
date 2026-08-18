@@ -34,7 +34,7 @@ PROGRESS_FILE = os.path.join(config.OUTPUT_DIR, "slab_progress.json")
 CHALLENGE_TIMEOUT_SEC = int(os.getenv("CHALLENGE_TIMEOUT_SEC", "900"))
 
 # 环境就绪轮询上限
-MAX_ENV_POLL = 60  # 每 10s 一次，最多 10min（环境构建通常 1-5min）
+MAX_ENV_POLL = 120  # 每 10s 一次，最多 20min（平台环境构建可能 >10min）
 
 
 def _load_progress() -> Dict:
@@ -181,7 +181,7 @@ def _build_strategy_hint(name: str, desc: str, category: str) -> str:
     return ""
 
 
-def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
+def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = None) -> Dict:
     """解单道题: 启环境 → Agent 解题 → 提交 flag → 回收"""
     ex_id = ch["exercise_id"]
     name = ch.get("name", "")
@@ -216,21 +216,29 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
 
     # 2. 启动环境（如需要）
     if detail.get("isNeedInit"):
-        print(f"\n[2/5] 启动环境...")
-        try:
-            # build 返回 "已构建/请勿频繁点击"(40409) 属正常幂等，继续轮询即可
+        # 预启动线程已就绪（ready[ex_id]=True）→ 直接复用，跳过 build + 轮询
+        if ready and ready.get(ex_id) is True:
+            print(f"\n[2/5] 环境已由预启动就绪（复用）")
             try:
-                api.build_env(ex_id)
-            except RuntimeError as e:
-                if "40409" not in str(e) and "已构建" not in str(e):
-                    raise
-                logger.info(f"环境已构建（幂等），继续等待就绪")
-            detail = _wait_env_ready(api, ex_id)
-        except Exception as e:
-            logger.error(f"❌ 环境启动失败: {e}")
-            progress["failed"].append(ex_id)
-            _save_progress(progress)
-            return {"status": "env_failed", "exercise_id": ex_id, "error": str(e)}
+                detail = api.get_exercise(ex_id)
+            except Exception:
+                pass
+        else:
+            print(f"\n[2/5] 启动环境...")
+            try:
+                # build 返回 "已构建/请勿频繁点击"(40409) 属正常幂等，继续轮询即可
+                try:
+                    api.build_env(ex_id)
+                except RuntimeError as e:
+                    if "40409" not in str(e) and "已构建" not in str(e):
+                        raise
+                    logger.info(f"环境已构建（幂等），继续等待就绪")
+                detail = _wait_env_ready(api, ex_id)
+            except Exception as e:
+                logger.error(f"❌ 环境启动失败: {e}")
+                progress["failed"].append(ex_id)
+                _save_progress(progress)
+                return {"status": "env_failed", "exercise_id": ex_id, "error": str(e)}
     else:
         print(f"\n[2/5] 环境已就绪（无需启动）")
 
@@ -508,7 +516,7 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
             prebuild_denied = True
             print("   ⛔ 平台拒绝预构建环境，已禁用预启动（恢复解题时才 build）")
         try:
-            r = solve_challenge(api, ch, progress)
+            r = solve_challenge(api, ch, progress, ready=ready)
             stats[r.get("status", "failed")] = stats.get(r.get("status", "failed"), 0) + 1
         except KeyboardInterrupt:
             print("\n\n⚠️ 用户中断，保存进度...")
