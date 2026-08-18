@@ -138,6 +138,12 @@ def _wait_env_ready(api: SlabMatchAPI, exercise_id: int) -> Dict:
     raise TimeoutError(f"exercise {exercise_id} 环境 {MAX_ENV_POLL*10}s 未就绪")
 
 
+def _build_denied(e: Exception) -> bool:
+    """build 被平台拒绝（如'创建靶机台数已达3数量，请销毁一台'）——不是幂等，继续等也没用"""
+    s = str(e)
+    return any(w in s for w in ["数量", "销毁", "已达", "上限", "创建靶机"])
+
+
 def _build_strategy_hint(name: str, desc: str, category: str) -> str:
     """按题目名/描述/分类注入专项解题思路（方法论级，不指向单题答案）"""
     text = f"{name} {desc} {category}".lower()
@@ -262,6 +268,9 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
                 try:
                     api.build_env(ex_id)
                 except RuntimeError as e:
+                    # 数量上限（"创建靶机台数已达3数量"）不是幂等——等也没用，快速失败
+                    if _build_denied(e):
+                        raise
                     if "40409" not in str(e) and "已构建" not in str(e):
                         raise
                     logger.info(f"环境已构建（幂等），继续等待就绪")
@@ -487,6 +496,10 @@ def _prebuild_env(ex_id: int, ready: dict):
             try:
                 api2.build_env(ex_id)
             except Exception as e:
+                # 数量上限（"创建靶机台数已达3数量"）→ denied（禁用预启动，等主循环回收后再 build）
+                if _build_denied(e):
+                    ready[ex_id] = "denied"
+                    return
                 if "40409" not in str(e) and "已构建" not in str(e):
                     ready[ex_id] = "denied"  # 平台拒绝预构建
                     return
