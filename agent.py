@@ -1,6 +1,7 @@
 """Agent 主循环 - ReAct 范式，支持 function calling"""
 import json
 import logging
+import re
 import threading
 from typing import List, Dict
 from config import config
@@ -232,6 +233,29 @@ CATEGORY_PROMPTS = {
 }
 
 
+def _detect_signal(messages: List[Dict]) -> bool:
+    """检测快解出迹象（并行方向暂停其他方向用，省 token）：
+    - extract_flag 命中（"找到 flag"/"已命中 flag"/"flag 候选"）
+    - write_file 写 exploit/leak/solve 脚本
+    - run_python 输出泄露 libc/堆地址（0x7f 开头十六进制）
+    """
+    for m in messages[-8:]:  # 只看最近几轮
+        content = m.get("content", "")
+        if isinstance(content, str):
+            if ("找到" in content and "flag" in content) or "已命中 flag" in content or "flag 候选" in content:
+                return True
+            if re.search(r"0x7f[0-9a-f]{10,}", content):
+                return True
+        for tc in m.get("tool_calls", []) or []:
+            fn = (tc.get("function") or {}).get("name", "")
+            args_str = (tc.get("function") or {}).get("arguments", "") or ""
+            if fn == "write_file" and any(k in args_str for k in ["exploit", "solve_", "pwn", "leak"]):
+                return True
+            if fn == "submit_flag":
+                return True
+    return False
+
+
 def build_agent(category: str = "", direction: str = "", **kwargs):
     """子 Agent 工厂：按题型生成专用 system_prompt + 工具子集。
 
@@ -453,6 +477,10 @@ class Agent:
 
             # 上下文压缩：每轮末尾压缩早期长 tool 结果（超阈值时），降低后段轮次 LLM 延迟
             self._compress_history()
+            # 迹象检测：本方向出现快解出迹象（extract_flag 命中/写 exploit/泄露地址）→
+            # 置事件通知其他并行方向提前停止（省 token）
+            if stop_event is not None and not stop_event.is_set() and _detect_signal(self.messages):
+                stop_event.set()
 
         status = {
             "success": self.submitted,
