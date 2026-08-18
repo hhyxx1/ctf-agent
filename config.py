@@ -122,6 +122,8 @@ class Config:
     MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "500"))
     # 并行方向 Agent 的轮次上限（多方向并行时每个方向各跑这么多轮；难题需要更多轮）
     PARALLEL_ROUNDS: int = int(os.getenv("PARALLEL_ROUNDS", "100"))
+    # 单 Agent 动态评估窗口：先跑这么多轮，无解出迹象则动态切多方向并行（替代固定 30 轮）
+    INITIAL_ROUNDS: int = int(os.getenv("INITIAL_ROUNDS", "10"))
     LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "90"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))

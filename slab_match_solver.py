@@ -21,7 +21,7 @@ import threading
 import logging
 from typing import Dict, List
 
-from agent import Agent, build_agent
+from agent import Agent, build_agent, _detect_signal
 from config import config
 from utils.slab_match_api import SlabMatchAPI
 
@@ -473,10 +473,13 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 - 找到 flag 后必须调用 submit_flag 提交，flag 格式一般为 flag{{...}}
 - **不要读无关文件**（.env、tasks.json、output/ 等不是本题内容）
 - 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
-    # 已知难题（经验库 failed>0 且该题型有多方向）→ 开局直接并行（方案 B，不等单 agent）
+    # 已知难题（经验库 failed>0 或 平台难度 MEDIUM/HARD 且该题型有多方向）→ 开局直接并行
+    # （不依赖 failed：打比赛全是 failed=0 的新题，靠难度字段判断难题）
     lessons = _load_lessons()
     entry = lessons.get((cat or "unknown").lower(), {})
-    hard = entry.get("failed", 0) > 0 and bool(DIRECTIONS.get((cat or "").lower()))
+    diff_upper = (diff or "").upper()
+    hard = (entry.get("failed", 0) > 0 or diff_upper in ("MEDIUM", "HARD")) \
+        and bool(DIRECTIONS.get((cat or "").lower()))
 
     parallel_flags = []
     if hard:
@@ -490,14 +493,15 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
         else:
             print(f"  🔀 并行未找到 flag（方向结果: {[v.get('success') or v.get('error', '') for v in pres.values()]}）")
     else:
-        print(f"\n[3/5] Agent 解题（超时 {CHALLENGE_TIMEOUT_SEC}s）...")
+        print(f"\n[3/5] Agent 解题（初始评估 {config.INITIAL_ROUNDS} 轮）...")
         agent = build_agent(cat)  # 规则分派子 Agent（按题型专用 prompt + 工具子集，独立上下文）
-        result = agent.run(task, verbose=True)
-        # 多方向并行：单 Agent 未解出（无 success 无 flag）→ 复杂题切 2-3 方向并行打同一靶场
-        if not result.get("success") and not result.get("flag_found"):
+        # 动态评估窗口：先跑 INITIAL_ROUNDS 轮，无解出迹象 → 动态切多方向并行（不等完整失败，比固定 30 轮快）
+        result = agent.run(task, verbose=True, max_iterations=config.INITIAL_ROUNDS)
+        no_signal = not _detect_signal(agent.messages)
+        if not result.get("success") and not result.get("flag_found") and no_signal:
             dirs = DIRECTIONS.get((cat or "").lower(), [])
             if dirs:
-                print(f"\n  🔀 单 Agent 未解出，启动多方向并行（{len(dirs)} 方向 × 40 轮）...")
+                print(f"\n  🔀 单 Agent {config.INITIAL_ROUNDS} 轮无解出迹象，动态切多方向并行（{len(dirs)} 方向）...")
                 parallel_flags, pres = _parallel_solve(task, cat)
                 if parallel_flags:
                     print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
