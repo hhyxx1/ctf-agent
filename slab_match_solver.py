@@ -165,6 +165,11 @@ def _build_denied(e: Exception) -> bool:
     return any(w in s for w in ["数量", "销毁", "已达", "上限", "创建靶机"])
 
 
+def _is_rate_limited(e: Exception) -> bool:
+    """平台限流（429）：请求太频繁被拒，临时性——跳过/重试，不是永久拒绝"""
+    return "429" in str(e)
+
+
 def _try_recover_env(api: SlabMatchAPI, ex_id: int):
     """尽力回收环境（每完成一题销毁一台，防止占满平台 3 台上限）；失败静默忽略"""
     try:
@@ -371,6 +376,9 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
                 try:
                     api.build_env(ex_id)
                 except RuntimeError as e:
+                    # 429 限流：临时性，快速失败进下一题（下次运行重试），不空等
+                    if _is_rate_limited(e):
+                        raise RuntimeError(f"平台限流(429): {e}")
                     # 数量上限（"创建靶机台数已达3数量"）不是幂等——等也没用，快速失败
                     if _build_denied(e):
                         raise
@@ -657,6 +665,9 @@ def _prebuild_env(ex_id: int, ready: dict):
             try:
                 api2.build_env(ex_id)
             except Exception as e:
+                # 429 限流：不是平台拒绝，跳过该题预启动即可（不禁用全局预启动）
+                if _is_rate_limited(e):
+                    return
                 # 数量上限（"创建靶机台数已达3数量"）→ denied（禁用预启动，等主循环回收后再 build）
                 if _build_denied(e):
                     ready[ex_id] = "denied"
