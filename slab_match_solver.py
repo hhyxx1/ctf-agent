@@ -97,6 +97,7 @@ def _extract_endpoint_target(exercise: Dict) -> str:
 def _wait_env_ready(api: SlabMatchAPI, exercise_id: int) -> Dict:
     """启动环境后轮询详情直到 isNeedCheck=false 且 endpoints 可用（最长 MAX_ENV_POLL*10s）"""
     empty_rounds = 0  # isNeedCheck=False 但 endpoints 空的连续次数（环境异常信号）
+    reset_done = False  # 是否已尝试过"回收+重建"重置
     for i in range(MAX_ENV_POLL):
         time.sleep(10)
         try:
@@ -108,13 +109,28 @@ def _wait_env_ready(api: SlabMatchAPI, exercise_id: int) -> Dict:
         has_endpoint = bool(d.get("endpoints"))
         if not need_check and has_endpoint:
             return d
-        # 环境异常：isNeedCheck=False 但 endpoints 空——平台认为不再构建却无端点，
-        # 等再久也不会好（实测 8min+ 无变化），连续 5 次（50s）即放弃，不空等 20min
+        # 环境异常：isNeedCheck=False 但 endpoints 空——平台认为不再构建却无端点。
+        # 先重置（回收+重建）让平台重新分配端点；重置后仍异常才放弃，不空等 20min
         if not need_check and not has_endpoint:
             empty_rounds += 1
-            if empty_rounds >= 5:
+            if empty_rounds >= 5 and not reset_done:
+                reset_done = True
+                empty_rounds = 0
+                logger.warning(f"exercise {exercise_id} 环境异常(isNeedCheck=False 无 endpoints)，尝试重置重建...")
+                try:
+                    api.recover_env(exercise_id)
+                except Exception:
+                    pass
+                time.sleep(3)
+                try:
+                    api.build_env(exercise_id)
+                except Exception:
+                    pass
+                print(f"  ⟳ 环境异常，已重置重建 {exercise_id}（等待重新就绪）")
+                continue
+            if empty_rounds >= 5 and reset_done:
                 raise TimeoutError(
-                    f"exercise {exercise_id} 环境异常: isNeedCheck=False 但 endpoints 空（平台构建问题），{empty_rounds*10}s 无变化"
+                    f"exercise {exercise_id} 环境异常: 重置后仍 isNeedCheck=False 且 endpoints 空（平台构建问题）"
                 )
         else:
             empty_rounds = 0
