@@ -405,7 +405,11 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
 
 
 def _prebuild_env(ex_id: int, ready: dict):
-    """后台预启动下一题环境（P2a）：独立 API 实例，幂等 build + 轮询就绪"""
+    """后台预启动下一题环境（P2a）：独立 API 实例，幂等 build + 轮询就绪
+
+    被平台拒绝（build 报错且非幂等）或异常时，标记 'denied'——
+    上层 run_slab 检测到 denied 即禁用后续预构建（恢复解题时才 build）。
+    """
     try:
         api2 = SlabMatchAPI()
         d = api2.get_exercise(ex_id)
@@ -414,6 +418,7 @@ def _prebuild_env(ex_id: int, ready: dict):
                 api2.build_env(ex_id)
             except Exception as e:
                 if "40409" not in str(e) and "已构建" not in str(e):
+                    ready[ex_id] = "denied"  # 平台拒绝预构建
                     return
             for _ in range(9):  # 最多 90s 轮询就绪
                 time.sleep(10)
@@ -425,7 +430,7 @@ def _prebuild_env(ex_id: int, ready: dict):
                     pass
         ready[ex_id] = True
     except Exception:
-        pass
+        ready[ex_id] = "denied"  # 异常也视为不可预构建
 
 
 def run_slab(timeout_sec: int = 0, start_time: float = 0):
@@ -454,6 +459,7 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
 
     stats = {"solved": 0, "partial": 0, "failed": 0, "skipped": 0}
     ready = {}  # 记录后台已预启动就绪的题
+    prebuild_denied = False  # 平台拒绝预构建时禁用后续预启动
     for i, ch in enumerate(challenges, 1):
         left = time_left()
         if left < 60:
@@ -461,12 +467,16 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
             break
         print(f"\n  题目 {i}/{len(challenges)} (剩 {left/60:.1f}min)")
         # P2a：解题前，后台线程预启动下一题环境（省环境等待 50s/题）
-        if i < len(challenges):
+        if i < len(challenges) and not prebuild_denied:
             nxt = challenges[i]["exercise_id"]
             if nxt not in progress["solved"] and nxt not in ready:
                 t = threading.Thread(target=_prebuild_env, args=(nxt, ready), daemon=True)
                 t.start()
                 print(f"   ⟳ 后台预启动下一题环境 (id={nxt})")
+        # 兜底：若平台拒绝预构建（denied），禁用后续预启动，恢复解题时才 build
+        if any(v == "denied" for v in ready.values()):
+            prebuild_denied = True
+            print("   ⛔ 平台拒绝预构建环境，已禁用预启动（恢复解题时才 build）")
         try:
             r = solve_challenge(api, ch, progress)
             stats[r.get("status", "failed")] = stats.get(r.get("status", "failed"), 0) + 1
