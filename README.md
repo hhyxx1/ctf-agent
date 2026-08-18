@@ -84,9 +84,9 @@ ctf_agent/
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `DEEPSEEK_API_KEY` | ✅ | 大模型 API Key |
-| `DEEPSEEK_BASE_URL` | 可选 | OpenAI 兼容接口地址（默认 DeepSeek 官方） |
-| `DEEPSEEK_MODEL` | 可选 | 模型名（默认 deepseek-chat） |
+| `DEEPSEEK_API_KEY` | ✅ | OpenAI 兼容接口的 API Key（DeepSeek/OpenAI/通义/本地 vLLM 均可） |
+| `DEEPSEEK_BASE_URL` | 可选 | OpenAI 兼容接口地址（默认 OpenAI 官方 `https://api.openai.com/v1`；DeepSeek 用 `https://api.deepseek.com`） |
+| `DEEPSEEK_MODEL` | 可选 | 模型名（默认 `gpt-4o-mini`，按你的服务填，如 `deepseek-chat`） |
 | `FORBIDDEN_PATHS` | 可选 | 禁止 Agent 访问的路径（JSON 列表），如你的跑分集源码/答案目录 |
 | `ALLOWED_WORKDIRS` | 可选 | 合法工作目录前缀（JSON 列表） |
 | `MAX_ITERATIONS` | 可选 | 单题最大推理轮次（默认 25） |

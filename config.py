@@ -90,9 +90,9 @@ class Config:
     # 原 https://api.deepseek.com → 托管时 http://api.deepseek.com.tsecbench.gw
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     DEEPSEEK_BASE_URL: str = _apply_gateway(
-        os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        os.getenv("DEEPSEEK_BASE_URL", "https://api.openai.com/v1")
     )
-    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "gpt-4o-mini")
 
     # ── 答题 API（平台注入）──
     # 平台注入变量名是 BENCHMARK_BASE_URL / BENCHMARK_TOKEN，做两套别名兼容
