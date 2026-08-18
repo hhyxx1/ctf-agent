@@ -8,7 +8,7 @@
 - **33 个工具**：Web 漏洞挖掘、二进制分析、漏洞利用、多阶段渗透、云攻击、对抗规避、Crypto/编码、Forensics、通用 shell/python/文件
 - **反作弊层**：所有工具调用走统一入口，路径隔离 + 全量审计 + 作弊拦截（防止 Agent 读取跑分集源码/答案）
 - **方法论知识库**：内置 12 类 CTF 解题方法论（WAF 绕过/SpEL/SQLi/SSRF/IDOR/SSTI/CBC/JSFuck 等）
-- **模型无关**：OpenAI 兼容接口，默认 DeepSeek，可换任意兼容模型
+- **模型无关**：基于 OpenAI 兼容接口，可接入任意兼容服务（OpenAI/通义/本地 vLLM 等），通过 `.env` 配置
 
 ## 快速开始（本地模式）
 
@@ -19,7 +19,7 @@ python3 -m venv .venv
 
 # 配置环境变量
 cp .env.example .env
-# 编辑 .env：至少填 DEEPSEEK_API_KEY
+# 编辑 .env：至少填 LLM_API_KEY
 
 # 跑一个通用测试任务
 .venv/bin/python main.py test
@@ -84,9 +84,9 @@ ctf_agent/
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `DEEPSEEK_API_KEY` | ✅ | OpenAI 兼容接口的 API Key（DeepSeek/OpenAI/通义/本地 vLLM 均可） |
-| `DEEPSEEK_BASE_URL` | 可选 | OpenAI 兼容接口地址（默认 OpenAI 官方 `https://api.openai.com/v1`；DeepSeek 用 `https://api.deepseek.com`） |
-| `DEEPSEEK_MODEL` | 可选 | 模型名（默认 `gpt-4o-mini`，按你的服务填，如 `deepseek-chat`） |
+| `LLM_API_KEY` | ✅ | OpenAI 兼容接口的 API Key（OpenAI/通义/本地 vLLM 等均可） |
+| `LLM_BASE_URL` | 可选 | OpenAI 兼容接口地址（默认 `https://api.openai.com/v1`） |
+| `LLM_MODEL` | 可选 | 模型名（默认 `gpt-4o-mini`，按你的服务填） |
 | `FORBIDDEN_PATHS` | 可选 | 禁止 Agent 访问的路径（JSON 列表），如你的跑分集源码/答案目录 |
 | `ALLOWED_WORKDIRS` | 可选 | 合法工作目录前缀（JSON 列表） |
 | `MAX_ITERATIONS` | 可选 | 单题最大推理轮次（默认 25） |
@@ -106,7 +106,7 @@ ALLOWED_WORKDIRS=["/tmp/chal_"]
 
 如果你的运行环境不能直连公网（例如某些隔离评测沙箱），可通过网关代理访问大模型：
 
-- `GATEWAY_MODE=off`：直连 `DEEPSEEK_BASE_URL`（默认）
+- `GATEWAY_MODE=off`：直连 `LLM_BASE_URL`（默认）
 - `GATEWAY_MODE=open`：按 `config.py` 中的 `_apply_gateway()` 规则转换 URL（https→http、域名加网关后缀）
 
 本地开发保持 `GATEWAY_MODE=off` 即可。

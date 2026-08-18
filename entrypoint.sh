@@ -13,8 +13,8 @@ echo "  Time: $(date)"
 echo "================================================"
 
 # 大模型 Key 必须存在（本地模式也要用）
-if [ -z "$DEEPSEEK_API_KEY" ]; then
-    echo "⚠️ DEEPSEEK_API_KEY 未注入，LLM 调用会失败"
+if [ -z "$LLM_API_KEY" ]; then
+    echo "⚠️ LLM_API_KEY 未注入，LLM 调用会失败"
     echo "   请在 .env 或环境变量中配置后再启动"
     # 不 exit，让主程序报错更清楚
 fi
@@ -28,7 +28,7 @@ else
     echo "  本地模式（未检测到平台 token）"
 fi
 
-echo "  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:0:8}..."
+echo "  LLM_API_KEY: ${LLM_API_KEY:0:8}..."
 echo "  GATEWAY_MODE: ${GATEWAY_MODE:-off}"
 
 # 启动 Agent 解题循环：

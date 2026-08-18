@@ -86,13 +86,17 @@ def _apply_gateway(url: str) -> str:
 
 
 class Config:
-    # ── 大模型 ──
-    # 原 https://api.deepseek.com → 托管时 http://api.deepseek.com.tsecbench.gw
-    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
-    DEEPSEEK_BASE_URL: str = _apply_gateway(
-        os.getenv("DEEPSEEK_BASE_URL", "https://api.openai.com/v1")
+    # ── 大模型（通用：LLM_* 为主，旧 DEEPSEEK_* 兼容别名）──
+    LLM_API_KEY: str = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "")
+    LLM_BASE_URL: str = _apply_gateway(
+        os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL", "https://api.openai.com/v1")
     )
-    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "gpt-4o-mini")
+    LLM_MODEL: str = os.getenv("LLM_MODEL") or os.getenv("DEEPSEEK_MODEL", "gpt-4o-mini")
+
+    # ── 向后兼容（旧 DEEPSEEK_* 引用仍可用）──
+    DEEPSEEK_API_KEY: str = LLM_API_KEY
+    DEEPSEEK_BASE_URL: str = LLM_BASE_URL
+    DEEPSEEK_MODEL: str = LLM_MODEL
 
     # ── 答题 API（平台注入）──
     # 平台注入变量名是 BENCHMARK_BASE_URL / BENCHMARK_TOKEN，做两套别名兼容

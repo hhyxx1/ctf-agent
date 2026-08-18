@@ -78,7 +78,7 @@ def cmd_auto():
         sys.exit(1)
 
     print(f"  BASE_URL: {config.COMPETITION_BASE_URL}")
-    print(f"  LLM 网关: {config.DEEPSEEK_BASE_URL}")
+    print(f"  LLM 网关: {config.LLM_BASE_URL}")
     print(f"  总时限: {config.TOTAL_TIMEOUT_SEC}s ({config.TOTAL_TIMEOUT_SEC/60:.0f}min)")
     print(f"  单题轮上限: {config.MAX_ITERATIONS}")
     print(f"  并发上限: {config.MAX_CONCURRENT}")
@@ -127,7 +127,7 @@ TSecBench (腾讯安全基准平台):
 配置 (编辑 .env 或由平台注入环境变量):
   BENCHMARK_BASE_URL=https://tsecbench.zc.tencent.com
   BENCHMARK_TOKEN=你的BENCHMARK_TOKEN
-  DEEPSEEK_API_KEY=sk-xxx
+  LLM_API_KEY=sk-xxx
   GATEWAY_MODE=open        启用 .tsecbench.gw 大模型网关（托管必启）
 """)
         return

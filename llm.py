@@ -9,11 +9,11 @@ logger = logging.getLogger(__name__)
 
 class LLM:
     def __init__(self):
-        if not config.DEEPSEEK_API_KEY:
-            raise ValueError("DEEPSEEK_API_KEY 未设置，请检查 .env 文件")
+        if not config.LLM_API_KEY:
+            raise ValueError("LLM_API_KEY 未设置，请检查 .env 文件")
         self.client = OpenAI(
-            api_key=config.DEEPSEEK_API_KEY,
-            base_url=config.DEEPSEEK_BASE_URL,
+            api_key=config.LLM_API_KEY,
+            base_url=config.LLM_BASE_URL,
             timeout=config.LLM_TIMEOUT,
         )
         self.max_retries = 3
@@ -21,7 +21,7 @@ class LLM:
     def chat(self, messages, tools=None, tool_choice="auto"):
         """调用大模型，支持 function calling"""
         kwargs = {
-            "model": config.DEEPSEEK_MODEL,
+            "model": config.LLM_MODEL,
             "messages": messages,
             "max_tokens": config.LLM_MAX_TOKENS,
             "temperature": config.LLM_TEMPERATURE,
