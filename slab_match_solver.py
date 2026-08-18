@@ -17,6 +17,7 @@ import os
 import re
 import json
 import time
+import threading
 import logging
 from typing import Dict, List
 
@@ -139,6 +140,8 @@ def _build_strategy_hint(name: str, desc: str, category: str) -> str:
             "- Web 题通用: 先抓首页+JS 源码看路由, dir_scan 找隐藏文件, 测常见参数\n"
             "  → 优先看源码泄露(备份文件 .bak/.swp/~, php://filter, 报错信息)\n"
             "  → 上传题: 测后缀绕过/内容绕过/解析漏洞; 包含题: 测 php://filter/php://input/data://\n"
+            "  → **轻量探测优先**: 先 curl 直接测常见路径(/index.php /upload.php /view.php /robots.txt /www.zip 等),\n"
+            "    慎用 gobuster 全量目录扫描(慢); 只有 curl 探测无果再考虑 dir_scan\n"
             "- **文件上传题专项（实战验证套路）**: 上传只是第一步, **必须触发执行**才能 RCE 读 flag\n"
             "  → 上传木马后找触发点: ①直接访问上传路径 ②找 include/require 包含点 ③LFI 包含上传文件\n"
             "  → 后缀绕过: .php/.phtml/.php5/.phar 变体, 大小写 .PHP, 双写 .pphphp, 尾部空格/点/::$DATA\n"
@@ -401,6 +404,30 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict) -> Dict:
     return {"status": status, "exercise_id": ex_id}
 
 
+def _prebuild_env(ex_id: int, ready: dict):
+    """后台预启动下一题环境（P2a）：独立 API 实例，幂等 build + 轮询就绪"""
+    try:
+        api2 = SlabMatchAPI()
+        d = api2.get_exercise(ex_id)
+        if d.get("isNeedInit"):
+            try:
+                api2.build_env(ex_id)
+            except Exception as e:
+                if "40409" not in str(e) and "已构建" not in str(e):
+                    return
+            for _ in range(9):  # 最多 90s 轮询就绪
+                time.sleep(10)
+                try:
+                    d = api2.get_exercise(ex_id)
+                    if not d.get("isNeedCheck") and d.get("endpoints"):
+                        break
+                except Exception:
+                    pass
+        ready[ex_id] = True
+    except Exception:
+        pass
+
+
 def run_slab(timeout_sec: int = 0, start_time: float = 0):
     """运行完整解题循环"""
     if start_time == 0:
@@ -426,12 +453,20 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
     print(f"📋 题目总数: {len(challenges)}")
 
     stats = {"solved": 0, "partial": 0, "failed": 0, "skipped": 0}
+    ready = {}  # 记录后台已预启动就绪的题
     for i, ch in enumerate(challenges, 1):
         left = time_left()
         if left < 60:
             print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min)，停止开新题")
             break
         print(f"\n  题目 {i}/{len(challenges)} (剩 {left/60:.1f}min)")
+        # P2a：解题前，后台线程预启动下一题环境（省环境等待 50s/题）
+        if i < len(challenges):
+            nxt = challenges[i]["exercise_id"]
+            if nxt not in progress["solved"] and nxt not in ready:
+                t = threading.Thread(target=_prebuild_env, args=(nxt, ready), daemon=True)
+                t.start()
+                print(f"   ⟳ 后台预启动下一题环境 (id={nxt})")
         try:
             r = solve_challenge(api, ch, progress)
             stats[r.get("status", "failed")] = stats.get(r.get("status", "failed"), 0) + 1

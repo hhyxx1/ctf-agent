@@ -220,11 +220,28 @@ SYSTEM_PROMPT = """你是一个专业的 CTF（夺旗赛）自动解题 Agent，
 
 class Agent:
     def __init__(self, system_prompt: str = SYSTEM_PROMPT):
+        # KV Cache 友好：system prompt 必须是静态常量，工具注册也静态生成（勿动态注入时间/状态）。
+        # 动态信息（时间戳/变色内容）只能作为新消息 append 到 messages 末尾，绝不改 system prompt。
         self.messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         self.iteration = 0
         self.tools = get_tools_schema()
         self.found_flag = False
         self.submitted = False
+
+    def _compress_history(self, threshold: int = 40, keep_tail: int = 10, max_len: int = 400):
+        """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果截断为摘要。
+
+        - 只压缩"system 之后、尾部 keep_tail 条之前"的 tool 消息 content
+        - 保留 role/tool_call_id 结构 → assistant.tool_calls → tool 响应链完整（deepseek 要求）
+        - 长 body 截断为 max_len + 压缩标记，降低后段轮次 LLM 延迟
+        """
+        if len(self.messages) <= threshold:
+            return
+        for i in range(1, len(self.messages) - keep_tail):
+            m = self.messages[i]
+            if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > max_len:
+                orig = len(m["content"])
+                m["content"] = m["content"][:max_len] + f"\n...[已压缩: 原文 {orig} 字符]..."
 
     def _call_llm(self) -> str:
         """调用 LLM，处理 tool_calls"""
@@ -366,6 +383,9 @@ class Agent:
                 if "无法" in result or "放弃" in result or "解不出来" in result:
                     print(f"\n⚠️ Agent 表示无法继续")
                     break
+
+            # 上下文压缩：每轮末尾压缩早期长 tool 结果（超阈值时），降低后段轮次 LLM 延迟
+            self._compress_history()
 
         status = {
             "success": self.submitted,
