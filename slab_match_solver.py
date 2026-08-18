@@ -208,6 +208,7 @@ def _parallel_solve(task: str, cat: str, max_rounds: int = None) -> (list, dict)
     dirs = DIRECTIONS.get((cat or "").lower(), [])
     if not dirs:
         return [], {}
+    stop_event = threading.Event()  # 任一方向找到 flag → 置事件，其他方向提前停止（省 token）
     results = {}
     flags = []
     lock = threading.Lock()
@@ -215,7 +216,7 @@ def _parallel_solve(task: str, cat: str, max_rounds: int = None) -> (list, dict)
     def worker(direction: str, i: int):
         try:
             ag = build_agent(cat, direction=direction)
-            r = ag.run(task, verbose=False, max_iterations=max_rounds)
+            r = ag.run(task, verbose=False, max_iterations=max_rounds, stop_event=stop_event)
             fs = set()
             for m in ag.messages:
                 for tc in m.get("tool_calls", []) or []:
@@ -228,6 +229,8 @@ def _parallel_solve(task: str, cat: str, max_rounds: int = None) -> (list, dict)
                                 fs.add(f)
                         except Exception:
                             pass
+            if fs:
+                stop_event.set()  # 本方向找到 flag → 通知其他方向停止
             with lock:
                 results[i] = {
                     "direction": direction[:30],

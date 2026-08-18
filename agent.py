@@ -1,6 +1,7 @@
 """Agent 主循环 - ReAct 范式，支持 function calling"""
 import json
 import logging
+import threading
 from typing import List, Dict
 from config import config
 from llm import llm
@@ -357,7 +358,8 @@ class Agent:
 
         return "\n".join(results)
 
-    def run(self, task: str, verbose: bool = True, max_iterations: int = None) -> dict:
+    def run(self, task: str, verbose: bool = True, max_iterations: int = None,
+            stop_event: threading.Event = None) -> dict:
         """
         运行 Agent 解题
 
@@ -391,6 +393,10 @@ class Agent:
         no_progress_rounds = 0  # 连续调工具但未找到 flag 的轮次（无进展检测）
         no_progress_advised = False  # 是否已注入过换思路提示
         while self.iteration < iter_limit:
+            # 并行停止信号：其他方向已找到 flag → 本方向提前停止（省 token）
+            if stop_event is not None and stop_event.is_set():
+                print("  ⏹️ 其他方向已找到 flag，本方向提前停止")
+                break
             self.iteration += 1
             # 无进展检测（基于上一轮状态）：连续调工具但一直没找到 flag → 注入换思路提示
             if self.iteration > 3:
