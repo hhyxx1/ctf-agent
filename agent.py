@@ -242,17 +242,18 @@ def build_agent(category: str = "", direction: str = "", **kwargs):
     sys_prompt = SYSTEM_PROMPT + CATEGORY_PROMPTS.get(cat, "")
     if direction:
         sys_prompt += f"\n\n## 本次解题方向（专注此方向，不要跑偏）\n{direction}"
-    return Agent(system_prompt=sys_prompt, category=cat, **kwargs)
+    return Agent(system_prompt=sys_prompt, category=cat, direction=direction, **kwargs)
 
 
 class Agent:
-    def __init__(self, system_prompt: str = SYSTEM_PROMPT, category: str = ""):
+    def __init__(self, system_prompt: str = SYSTEM_PROMPT, category: str = "", direction: str = ""):
         # KV Cache 友好：system prompt 必须是静态常量，工具注册也静态生成（勿动态注入时间/状态）。
         # 动态信息（时间戳/变色内容）只能作为新消息 append 到 messages 末尾，绝不改 system prompt。
         self.messages: List[Dict] = [{"role": "system", "content": system_prompt}]
         self.iteration = 0
         # 子 Agent：按题型过滤工具子集（题型优先生成 + 通用兜底 run_shell 等，分类错也能解）
         self.tools = get_tools_schema(category)
+        self.direction = direction  # 并行方向（多方向并行时各自专注；无进展提示带方向约束用）
         self.found_flag = False
         self.submitted = False
         self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
@@ -400,12 +401,16 @@ class Agent:
                 if no_progress_rounds >= 25 and not no_progress_advised:
                     no_progress_advised = True
                     no_progress_rounds = 0
-                    self.messages.append({
-                        "role": "user",
-                        "content": "【系统提示】已连续多轮调用工具但未找到 flag。请重新审视方向，避免重复尝试："
-                                   "①确认漏洞入口是否正确（读源码/分析协议/检查附件）"
-                                   "②是否漏了特殊参数或入口 ③换一个利用思路。继续解题。",
-                    })
+                    # 并行方向约束：有 direction（多方向并行 agent）→ 提示坚持本方向换方法，防跑偏到其他方向
+                    if self.direction:
+                        tip = (f"【系统提示】已连续多轮调用工具但未找到 flag。"
+                               f"**请坚持本方向**：{self.direction}。"
+                               f"换本方向内的不同方法（不要跑偏到其他方向），继续解题。")
+                    else:
+                        tip = ("【系统提示】已连续多轮调用工具但未找到 flag。请重新审视方向，避免重复尝试："
+                               "①确认漏洞入口是否正确（读源码/分析协议/检查附件）"
+                               "②是否漏了特殊参数或入口 ③换一个利用思路。继续解题。")
+                    self.messages.append({"role": "user", "content": tip})
                     print("  ⚠️ 无进展 25 轮，已注入换思路提示")
             print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
 

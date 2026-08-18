@@ -198,11 +198,13 @@ DIRECTIONS = {
 }
 
 
-def _parallel_solve(task: str, cat: str, max_rounds: int = 40) -> (list, dict):
+def _parallel_solve(task: str, cat: str, max_rounds: int = None) -> (list, dict):
     """复杂题多方向并行：2-3 个方向子 agent 同时打同一靶场（共享 task 里的 target）。
 
     返回 (找到的显式 flag 列表, 各方向结果 dict)——多方向并行提升复杂题解出率。
     """
+    if max_rounds is None:
+        max_rounds = config.PARALLEL_ROUNDS  # 默认 100（难题需要更多轮）
     dirs = DIRECTIONS.get((cat or "").lower(), [])
     if not dirs:
         return [], {}
@@ -477,7 +479,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     if hard:
         dirs = DIRECTIONS.get((cat or "").lower(), [])
         print(f"\n  🔀 已知难题（同类此前失败 {entry['failed']} 次），开局 {len(dirs)} 方向并行...")
-        parallel_flags, pres = _parallel_solve(task, cat, max_rounds=40)
+        parallel_flags, pres = _parallel_solve(task, cat)
         agent = None  # 难题开局并行，无单 agent
         result = {"success": False, "flag_found": bool(parallel_flags)}
         if parallel_flags:
@@ -493,7 +495,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
             dirs = DIRECTIONS.get((cat or "").lower(), [])
             if dirs:
                 print(f"\n  🔀 单 Agent 未解出，启动多方向并行（{len(dirs)} 方向 × 40 轮）...")
-                parallel_flags, pres = _parallel_solve(task, cat, max_rounds=40)
+                parallel_flags, pres = _parallel_solve(task, cat)
                 if parallel_flags:
                     print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
                 else:
