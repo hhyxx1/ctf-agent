@@ -357,6 +357,8 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
             paths = entry.get("solved_paths") or []
             if paths:
                 parts.append(f"此类题此前成功路径参考: {' → '.join(paths[-1])}")
+            if entry.get("notes"):
+                parts.append(f"此类题经验笔记: {entry['notes']}")
             if entry.get("failed", 0) > 0:
                 parts.append(f"⚠️ 此类题此前失败 {entry['failed']} 次，注意换思路，避免重复踩坑")
             if parts:
