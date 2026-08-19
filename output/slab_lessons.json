@@ -52,7 +52,8 @@
         "submit_flag"
       ]
     ],
-    "failed": 0
+    "failed": 0,
+    "notes": "【tsecbench 通关补充(服务/网络类)】\nc-07 类(开放 Telnet): 23 端口 nc/telnet 直连 → 交互式 shell/服务探测 → 用脚本(pwntools/paramiko)自动化交互拿 flag。"
   },
   "web": {
     "solved_paths": [
@@ -63,6 +64,6 @@
       ]
     ],
     "failed": 0,
-    "notes": "【tsecbench 实战补充(Web 类)】\na-05 类(文件下载站): 弱口令登录(employee/employee123 等)进 dashboard → 找 download.php?id= 文件下载点\n  → 测 LFI/任意文件读取(../../etc/passwd、id 参数路径穿越) → 读 flag 文件。\nc-06 类(图数据库 API): 8080 端口 HugeGraph/图数据库 → /gremlin POST {\"gremlin\":\"表达式\",\"language\":\"gremlin-groovy\"}\n  → Gremlin-Groovy 脚本执行 → 可能 RCE/读文件(沙箱逃逸方向)。\nc-03 类(Next.js 前端): 下载 static/chunks/app/*.js 本地 grep 找 flag/线索(字符串/编码)\n  + 找 /console/api/setup 等管理入口(Adminer/数据库管理) → 未授权/弱口令。\n教训: 找不到 flag 时换思路——后端 API/管理入口/图数据库脚本执行, 不要只在前端 JS 里 grep。"
+    "notes": "【tsecbench 实战补充(Web 类)】\na-05 类(文件下载站): 弱口令登录(employee/employee123 等)进 dashboard → 找 download.php?id= 文件下载点\n  → 测 LFI/任意文件读取(../../etc/passwd、id 参数路径穿越) → 读 flag 文件。\nc-06 类(图数据库 API): 8080 端口 HugeGraph/图数据库 → /gremlin POST {\"gremlin\":\"表达式\",\"language\":\"gremlin-groovy\"}\n  → Gremlin-Groovy 脚本执行 → 可能 RCE/读文件(沙箱逃逸方向)。\nc-03 类(Next.js 前端): 下载 static/chunks/app/*.js 本地 grep 找 flag/线索(字符串/编码)\n  + 找 /console/api/setup 等管理入口(Adminer/数据库管理) → 未授权/弱口令。\n教训: 找不到 flag 时换思路——后端 API/管理入口/图数据库脚本执行, 不要只在前端 JS 里 grep。\n【tsecbench 通关补充(Web/服务类)】\nc-06 类(图数据库 API): 8080 HugeGraph → /gremlin POST gremlin-groovy 脚本执行。\nc-08 类(Gradio/ML API): 7860 端口 → 先拿 /openapi.json 看全部 API → 调 /api/v1/* 验证函数(validate 等) → 找可利用参数。\nc-09 类(HTTPS 服务): 8443 端口 → socket/nc 探测协议，TLS 证书/HTTP 服务识别后再定向利用。\nd-01/d-02 类(S3/对象存储): 8000 端口 → /company-assets/ 目录枚举 + ?list 列桶/对象 → 逐个读对象文件(README/图片/文档)找 flag(多 flag 题逐个对象挖)。"
   }
 }
