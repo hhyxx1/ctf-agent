@@ -18,6 +18,7 @@ import re
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import logging
 from typing import Dict, List
 
@@ -47,10 +48,15 @@ def _load_progress() -> Dict:
     return {"solved": [], "failed": [], "in_progress": [], "submitted_flags": {}, "history": []}
 
 
+# 进度并发锁：两题并行时多个 solve_challenge 线程同时写进度文件，需串行化防写坏
+PROGRESS_LOCK = threading.Lock()
+
+
 def _save_progress(progress: Dict) -> None:
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    with open(PROGRESS_FILE, "w") as f:
-        json.dump(progress, f, ensure_ascii=False, indent=2)
+    with PROGRESS_LOCK:
+        with open(PROGRESS_FILE, "w") as f:
+            json.dump(progress, f, ensure_ascii=False, indent=2)
 
 
 # ── 解题经验库（P1 经验沉淀 + P2 失败卡点；方法论级，不含单题答案/flag）──
@@ -552,6 +558,7 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     # 已失败的 flag（平台拒绝过）——同题重复值不再提交，省提交次数
     failed_flags = progress.get("failed_flags", {}).get(str(ex_id), [])
     correct = False
+    wrong_streak = 0  # 连续错误提交计数（熔断：连错 3 次停提该题，防烧提交次数，借鉴 loot_gate SUBMIT_MAX_WRONG）
     seen = set()  # 本回合内已提交过的值（防同一 flag 重复提交）
     for flag in found_flags:
         # 剥离 DASCTF{}/flag{} 包裹得到纯内容（平台答案库存纯数字，实测确认）
@@ -569,11 +576,16 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
                 print(f"  ✅ 正确! {cand}")
                 submitted.append(cand)
                 correct = True
+                wrong_streak = 0
                 break
             else:
                 print(f"  ❌ 错误: {cand}")
                 if cand not in failed_flags:
                     failed_flags.append(cand)
+                wrong_streak += 1
+                if wrong_streak >= 3:
+                    print("  ⏹️ 连续错 3 次，停止该题提交（熔断，防烧提交次数）")
+                    break
         except Exception as e:
             logger.warning(f"提交异常: {e}")
             if cand not in failed_flags:
@@ -721,34 +733,54 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
     stats = {"solved": 0, "partial": 0, "failed": 0, "skipped": 0}
     ready = {}  # 记录后台已预启动就绪的题
     prebuild_denied = False  # 平台拒绝预构建时禁用后续预启动
-    for i, ch in enumerate(challenges, 1):
-        left = time_left()
-        if left < 60:
-            print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min)，停止开新题")
-            break
-        print(f"\n  题目 {i}/{len(challenges)} (剩 {left/60:.1f}min)")
-        # P2a：解题前，后台线程预启动下一题环境（省环境等待 50s/题）
-        if i < len(challenges) and not prebuild_denied:
-            nxt = challenges[i]["exercise_id"]
-            if nxt not in progress["solved"] and nxt not in ready:
-                t = threading.Thread(target=_prebuild_env, args=(nxt, ready), daemon=True)
-                t.start()
-                print(f"   ⟳ 后台预启动下一题环境 (id={nxt})")
-        # 兜底：若平台拒绝预构建（denied），禁用后续预启动，恢复解题时才 build
-        if any(v == "denied" for v in ready.values()):
-            prebuild_denied = True
-            print("   ⛔ 平台拒绝预构建环境，已禁用预启动（恢复解题时才 build）")
-        try:
-            r = solve_challenge(api, ch, progress, ready=ready)
-            stats[r.get("status", "failed")] = stats.get(r.get("status", "failed"), 0) + 1
-        except KeyboardInterrupt:
-            print("\n\n⚠️ 用户中断，保存进度...")
-            _save_progress(progress)
-            break
-        except Exception as e:
-            logger.error(f"❌ 题目 {ch['exercise_id']} 出错: {e}", exc_info=True)
-            stats["failed"] = stats.get("failed", 0) + 1
-        time.sleep(2)
+    # 持续填槽两题并行（借鉴 pi-recon 填槽调度）：同时最多 2 题在途，
+    # 一题完成立即补下一题——卡题不阻塞，总吞吐提升
+    MAX_INFLIGHT = 2
+    inflight = {}  # future -> challenge
+    idx = 0
+
+    def _fill_slots(ex, inflight, idx, prebuild_denied):
+        """预启动下一题 + 填槽提交，保持 MAX_INFLIGHT 题在途"""
+        while idx < len(challenges) and len(inflight) < MAX_INFLIGHT:
+            left = time_left()
+            if left < 60:
+                print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min)，停止开新题")
+                return idx, prebuild_denied
+            ch = challenges[idx]
+            print(f"\n  题目 {idx+1}/{len(challenges)} (剩 {left/60:.1f}min)")
+            # P2a：后台预启动下一题环境（省环境等待；并行 build 冲突由 denied/429 兜底）
+            if idx + 1 < len(challenges) and not prebuild_denied:
+                nxt = challenges[idx + 1]["exercise_id"]
+                if nxt not in progress["solved"] and nxt not in ready:
+                    t = threading.Thread(target=_prebuild_env, args=(nxt, ready), daemon=True)
+                    t.start()
+                    print(f"   ⟳ 后台预启动下一题环境 (id={nxt})")
+            # 兜底：平台拒绝预构建（denied）→ 禁用后续预启动（恢复解题时才 build）
+            if any(v == "denied" for v in ready.values()):
+                prebuild_denied = True
+                print("   ⛔ 平台拒绝预构建环境，已禁用预启动（恢复解题时才 build）")
+            f = ex.submit(solve_challenge, api, ch, progress, ready)
+            inflight[f] = ch
+            idx += 1
+        return idx, prebuild_denied
+
+    with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as ex:
+        idx, prebuild_denied = _fill_slots(ex, inflight, idx, prebuild_denied)
+        while inflight:
+            done, _ = wait(list(inflight.keys()), return_when=FIRST_COMPLETED)
+            for f in done:
+                ch = inflight.pop(f)
+                try:
+                    r = f.result()
+                    stats[r.get("status", "failed")] = stats.get(r.get("status", "failed"), 0) + 1
+                except KeyboardInterrupt:
+                    print("\n\n⚠️ 用户中断，保存进度...")
+                    _save_progress(progress)
+                    return
+                except Exception as e:
+                    logger.error(f"❌ 题目 {ch['exercise_id']} 出错: {e}", exc_info=True)
+                    stats["failed"] = stats.get("failed", 0) + 1
+            idx, prebuild_denied = _fill_slots(ex, inflight, idx, prebuild_denied)
 
     elapsed = time.time() - start_time
     print(f"\n{'='*60}")
