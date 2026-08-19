@@ -212,6 +212,31 @@ Flag 数量: {flag_count}
     agent_success = result.get("success", False)
     final_msg = result.get("final_message", "")
 
+    # 沉淀经验（成功存工具路径；真解题失败（跑了不少轮）记 failed；
+    # token 耗尽/LLM 失败（iterations 少）不记，避免污染经验库）
+    try:
+        from slab_match_solver import _load_lessons, _save_lessons
+        lessons = _load_lessons()
+        entry = lessons.setdefault(cat, {"solved_paths": [], "failed": 0, "notes": ""})
+        if result.get("success") or result.get("flag_found"):
+            path = []
+            for m in agent.messages:
+                for tc in m.get("tool_calls", []) or []:
+                    fn = (tc.get("function") or {}).get("name", "")
+                    if fn and fn not in path:
+                        path.append(fn)
+            path = path[:8]
+            if path and path not in entry["solved_paths"]:
+                entry["solved_paths"].append(path)
+                entry["solved_paths"] = entry["solved_paths"][-5:]
+                _save_lessons(lessons)
+        elif (result.get("iterations") or 0) >= 10:
+            # 真解题失败（跑了不少轮没解出）才记 failed
+            entry["failed"] += 1
+            _save_lessons(lessons)
+    except Exception:
+        pass
+
     # 4. 从 Agent 的输出中提取 flag 并提交
     print(f"\n[3/5] 提交 flag...")
     submitted_flags = progress["submitted_flags"].get(unique_code, [])
