@@ -82,8 +82,16 @@ class LLM:
         for attempt in range(self.max_retries):
             try:
                 if self.gateway_mode:
-                    return self._chat_via_requests(kwargs)
-                return self.client.chat.completions.create(**kwargs)
+                    resp = self._chat_via_requests(kwargs)
+                else:
+                    resp = self.client.chat.completions.create(**kwargs)
+                # 防御：非标准响应（str/无 choices）→ 抛清晰错误（提示检查 LLM 端点配置）
+                if not hasattr(resp, "choices"):
+                    raise ValueError(
+                        f"LLM 端点返回非标准响应（类型 {type(resp).__name__}，无 choices 字段）——"
+                        f"检查 LLM_BASE_URL({config.LLM_BASE_URL}) 是否为 OpenAI 兼容 /chat/completions 端点"
+                    )
+                return resp
             except Exception as e:
                 last_err = e
                 wait = 2 ** attempt
