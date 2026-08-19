@@ -422,13 +422,14 @@ class Agent:
                 print("  ⏹️ 其他方向已找到 flag，本方向提前停止")
                 break
             self.iteration += 1
-            # 无进展检测（基于上一轮状态）：连续调工具但一直没找到 flag → 注入换思路提示
+            # 无进展检测（基于上一轮状态）：连续调工具、未找到 flag **且无解出迹象**（50 轮）→ 注入换思路提示。
+            # 有迹象（正在写 exploit/泄露地址，快出来了）→ 重置计数，不打断。
             if self.iteration > 3:
-                if self._last_has_tool_calls and not self.found_flag:
+                if self._last_has_tool_calls and not self.found_flag and not _detect_signal(self.messages):
                     no_progress_rounds += 1
-                elif self.found_flag:
+                else:
                     no_progress_rounds = 0
-                if no_progress_rounds >= 25 and not no_progress_advised:
+                if no_progress_rounds >= 50 and not no_progress_advised:
                     no_progress_advised = True
                     no_progress_rounds = 0
                     # 并行方向约束：有 direction（多方向并行 agent）→ 提示坚持本方向换方法，防跑偏到其他方向
@@ -441,7 +442,7 @@ class Agent:
                                "①确认漏洞入口是否正确（读源码/分析协议/检查附件）"
                                "②是否漏了特殊参数或入口 ③换一个利用思路。继续解题。")
                     self.messages.append({"role": "user", "content": tip})
-                    print("  ⚠️ 无进展 25 轮，已注入换思路提示")
+                    print("  ⚠️ 无迹象 50 轮，已注入换思路提示")
             print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
 
             try:
