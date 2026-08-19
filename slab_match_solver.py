@@ -641,6 +641,31 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     except Exception:
         pass
 
+    # 8. RECON_DIGEST 结构化摘要（pi-recon 借鉴：技术栈/已试路径/近失点，存 output/digest/{ex_id}.json）
+    try:
+        digest_dir = os.path.join(config.OUTPUT_DIR, "digest")
+        os.makedirs(digest_dir, exist_ok=True)
+        tried = []
+        for m in (agent.messages if agent else []):
+            for tc in m.get("tool_calls", []) or []:
+                fn = (tc.get("function") or {}).get("name", "")
+                if fn and fn not in tried:
+                    tried.append(fn)
+        digest = {
+            "exercise_id": ex_id,
+            "name": name,
+            "category": cat,
+            "status": status,
+            "iterations": result.get("iterations", agent.iteration if agent else 0),
+            "tried_path": tried[:12],  # 已试路径（工具序列）
+            "near_miss": [],  # 近失点（预留：后续可自动提取半成功线索）
+            "note": f"{status}: 已试 {len(tried)} 类工具",
+        }
+        with open(os.path.join(digest_dir, f"{ex_id}.json"), "w") as _f:
+            json.dump(digest, _f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
     # 6. 回收环境（仅独占场景可回收；共享/非独占场景平台自动回收，跳过）
     ep_type = (detail.get("endpointType") or "").lower()
     print(f"\n[5/5] 回收环境... (endpointType={detail.get('endpointType') or '?'})")

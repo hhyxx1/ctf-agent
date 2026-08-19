@@ -308,6 +308,10 @@ class Agent:
 
         # 把 assistant 消息加入历史（包括 tool_calls）
         assistant_msg = {"role": "assistant", "content": msg.content or ""}
+        # deepseek thinking 模式要求回传 reasoning_content（否则 400: must be passed back to the API）
+        rc = getattr(msg, "reasoning_content", None)
+        if rc:
+            assistant_msg["reasoning_content"] = rc
         if msg.tool_calls:
             assistant_msg["tool_calls"] = [
                 {
