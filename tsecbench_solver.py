@@ -101,11 +101,6 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
     diff = challenge.get("difficulty", "?")
     flag_count = challenge.get("flag_count", 1)
 
-    # 跳过已完成的
-    if unique_code in progress["solved"] or challenge.get("is_completed"):
-        logger.info(f"⏭️ {unique_code} 已通关，跳过")
-        return {"status": "skipped", "code": unique_code}
-
     print(f"\n{'='*60}")
     print(f"🎯 解题: {unique_code} (难度: {diff}, flags: {flag_count})")
     print(f"{'='*60}")

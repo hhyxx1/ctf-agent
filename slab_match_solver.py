@@ -341,11 +341,6 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     name = ch.get("name", "")
     cat = ch.get("category", "")
 
-    # 跳过已通关（回收环境：每完成一题销毁一台，防占满 3 台上限）
-    if ex_id in progress["solved"] or ch.get("has_solved"):
-        _try_recover_env(api, ex_id)
-        return {"status": "skipped", "exercise_id": ex_id}
-
     print(f"\n{'='*60}")
     print(f"🎯 解题: [{cat}] {name} (id={ex_id})")
     print(f"{'='*60}")
