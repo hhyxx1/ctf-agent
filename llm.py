@@ -30,11 +30,26 @@ class LLM:
             raise ValueError("LLM_API_KEY 未设置，请检查 .env 文件")
         self.client = OpenAI(
             api_key=config.LLM_API_KEY,
-            base_url=config.LLM_BASE_URL,
+            base_url=self._openai_base(config.LLM_BASE_URL),
             timeout=config.LLM_TIMEOUT,
         )
         self.max_retries = 3
         self.gateway_mode = _is_gateway_url(config.LLM_BASE_URL)
+
+    @staticmethod
+    def _openai_base(url: str) -> str:
+        """确保 OpenAI 标准 base_url：非网关模式自动补 /v1（标准路径为 /v1/chat/completions）。
+
+        aiii.doyo.icu 等 OpenAI 兼容端点只有 /v1/chat/completions 返回标准 JSON，
+        /chat/completions 返回 HTML 首页（导致响应解析成 str 崩溃）。
+        网关类 URL（slab llm-gateway / tsecbench .tsecbench.gw）不做处理。
+        """
+        if _is_gateway_url(url) or ".tsecbench.gw" in url:
+            return url
+        url = url.rstrip("/")
+        if not url.endswith("/chat/completions") and not url.endswith("/v1"):
+            return url + "/v1"
+        return url
 
     def _chat_via_requests(self, payload: dict):
         """网关模式：直接请求 base_url 本身（原始 URL 已含完整端点，不拼 /chat/completions）"""
