@@ -64,6 +64,22 @@
       ]
     ],
     "failed": 0,
-    "notes": "【tsecbench 实战补充(Web 类)】\na-05 类(文件下载站): 弱口令登录(employee/employee123 等)进 dashboard → 找 download.php?id= 文件下载点\n  → 测 LFI/任意文件读取(../../etc/passwd、id 参数路径穿越) → 读 flag 文件。\nc-06 类(图数据库 API): 8080 端口 HugeGraph/图数据库 → /gremlin POST {\"gremlin\":\"表达式\",\"language\":\"gremlin-groovy\"}\n  → Gremlin-Groovy 脚本执行 → 可能 RCE/读文件(沙箱逃逸方向)。\nc-03 类(Next.js 前端): 下载 static/chunks/app/*.js 本地 grep 找 flag/线索(字符串/编码)\n  + 找 /console/api/setup 等管理入口(Adminer/数据库管理) → 未授权/弱口令。\n教训: 找不到 flag 时换思路——后端 API/管理入口/图数据库脚本执行, 不要只在前端 JS 里 grep。\n【tsecbench 通关补充(Web/服务类)】\nc-06 类(图数据库 API): 8080 HugeGraph → /gremlin POST gremlin-groovy 脚本执行。\nc-08 类(Gradio/ML API): 7860 端口 → 先拿 /openapi.json 看全部 API → 调 /api/v1/* 验证函数(validate 等) → 找可利用参数。\nc-09 类(HTTPS 服务): 8443 端口 → socket/nc 探测协议，TLS 证书/HTTP 服务识别后再定向利用。\nd-01/d-02 类(S3/对象存储): 8000 端口 → /company-assets/ 目录枚举 + ?list 列桶/对象 → 逐个读对象文件(README/图片/文档)找 flag(多 flag 题逐个对象挖)。"
+    "notes": "【tsecbench 实战补充(Web 类)】\na-05 类(文件下载站): 弱口令登录(employee/employee123 等)进 dashboard → 找 download.php?id= 文件下载点\n  → 测 LFI/任意文件读取(../../etc/passwd、id 参数路径穿越)。\n  → **教训: flag 若不在文件系统（LFI 读文件全'文件不存在'），换攻击面——试 admin 登录(弱口令/SQLi 绕过 admin'-- -) → admin dashboard 的 flag-box（对比 e1 系列: 登录后页面才有 flag）。\nc-06 类(图数据库 API): 8080 端口 HugeGraph/图数据库 → /gremlin POST {\"gremlin\":\"表达式\",\"language\":\"gremlin-groovy\"}\n  → Gremlin-Groovy 脚本执行 → 可能 RCE/读文件(沙箱逃逸方向)。\nc-03 类(Next.js 前端): 下载 static/chunks/app/*.js 本地 grep 找 flag/线索(字符串/编码)\n  + 找 /console/api/setup 等管理入口(Adminer/数据库管理) → 未授权/弱口令。\n教训: 找不到 flag 时换思路——后端 API/管理入口/图数据库脚本执行, 不要只在前端 JS 里 grep。\n【tsecbench 通关补充(Web/服务类)】\nc-06 类(图数据库 API): 8080 HugeGraph → /gremlin POST gremlin-groovy 脚本执行。\nc-08 类(Gradio/ML API): 7860 端口 → 先拿 /openapi.json 看全部 API → 调 /api/v1/* 验证函数(validate 等) → 找可利用参数。\nc-09 类(HTTPS 服务): 8443 端口 → socket/nc 探测协议，TLS 证书/HTTP 服务识别后再定向利用。\nd-01/d-02 类(S3/对象存储): 8000 端口 → /company-assets/ 目录枚举 + ?list 列桶/对象 → 逐个读对象文件(README/图片/文档)找 flag(多 flag 题逐个对象挖)。"
+  },
+  "unknown": {
+    "solved_paths": [
+      [
+        "web_fingerprint",
+        "dir_scan",
+        "http_request",
+        "nmap_scan",
+        "vuln_scan",
+        "run_shell",
+        "sqli_scan",
+        "read_file"
+      ]
+    ],
+    "failed": 3,
+    "notes": ""
   }
 }

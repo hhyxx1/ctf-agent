@@ -256,6 +256,16 @@ def _detect_signal(messages: List[Dict]) -> bool:
     return False
 
 
+# 无进展换思路提示：按题型给攻击面方向（避免 agent 在同一终点的变体里打转）
+CATEGORY_TIPS = {
+    "web": "flag 若不在当前方向（如文件系统/接口），换攻击面：试 admin 登录(弱口令/SQLi 绕过 admin'-- -)/其他功能/接口/dashboard——登录后页面常藏 flag。",
+    "pwn": "flag 若不在当前方向，换利用链：泄露→覆盖→RCE（试其他漏洞点/偏移/堆风水）。",
+    "crypto": "flag 若不在当前方向，换算法思路：弱密钥/共模/小指数/编码套娃。",
+    "misc": "flag 若不在当前方向，换数据来源：隐写/流量/压缩包/编码。",
+}
+GENERIC_TIP = "flag 若不在当前方向，换攻击面而非同一终点的变体（试其他功能/入口/接口）。"
+
+
 def build_agent(category: str = "", direction: str = "", **kwargs):
     """子 Agent 工厂：按题型生成专用 system_prompt + 工具子集。
 
@@ -279,6 +289,7 @@ class Agent:
         # 子 Agent：按题型过滤工具子集（题型优先生成 + 通用兜底 run_shell 等，分类错也能解）
         self.tools = get_tools_schema(category)
         self.direction = direction  # 并行方向（多方向并行时各自专注；无进展提示带方向约束用）
+        self.category = category  # 题型（换思路提示按题型给攻击面方向用）
         self.found_flag = False
         self.submitted = False
         self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
@@ -442,11 +453,16 @@ class Agent:
                                f"**请坚持本方向**：{self.direction}。"
                                f"换本方向内的不同方法（不要跑偏到其他方向），继续解题。")
                     else:
-                        tip = ("【系统提示】已连续多轮调用工具但未找到 flag。请重新审视方向，避免重复尝试："
-                               "①确认漏洞入口是否正确（读源码/分析协议/检查附件）"
-                               "②是否漏了特殊参数或入口 ③换一个利用思路。继续解题。")
+                        # 无 direction（单 agent）：按题型给攻击面方向（避免同一终点的变体里打转）
+                        tip = ("【系统提示】已连续多轮调用工具但未找到 flag。"
+                               + CATEGORY_TIPS.get((self.category or "").lower(), GENERIC_TIP)
+                               + "继续解题。")
                     self.messages.append({"role": "user", "content": tip})
                     print("  ⚠️ 无迹象 50 轮，已注入换思路提示")
+                elif no_progress_advised and no_progress_rounds >= 15:
+                    # 无迹象提示后再 15 轮仍无进展 → 强制止损进下一题（防卡题空耗，log3-1 的 83 分钟）
+                    print(f"  ⏹️ 无迹象提示后再 {no_progress_rounds} 轮无进展，强制止损")
+                    break
             print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
 
             try:
