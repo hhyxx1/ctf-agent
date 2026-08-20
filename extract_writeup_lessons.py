@@ -84,7 +84,7 @@ def process(path: str) -> dict:
         entry = lessons.setdefault(cat, {"solved_paths": [], "failed": 0, "notes": ""})
         new = "【writeup 合成】" + "；".join(methods[:8])
         if new not in entry.get("notes", ""):
-            entry["notes"] = (entry.get("notes", "") + "\n" + new).strip()[:3000]
+            entry["notes"] = (entry.get("notes", "") + "\n" + new).strip()[:5000]
             total += 1
 
     os.makedirs(os.path.dirname(lessons_file), exist_ok=True)

@@ -18,6 +18,7 @@
 """
 import os
 import json
+import re
 import time
 import signal
 import logging
@@ -216,7 +217,9 @@ Flag 数量: {flag_count}
     # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
     # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
-        result = agent.run(task)
+        # D1 按难度给轮次（log4-1: hard 题 50 轮不够——23 题 50 轮截断、19 failed）
+        _iter_limit = {"easy": 30, "medium": 50, "hard": 80, "expert": 100}.get((diff or "").lower(), 50)
+        result = agent.run(task, max_iterations=_iter_limit)
     except Exception as e:
         logger.error(f"❌ {unique_code} 解题异常: {e}")
         result = {
@@ -244,8 +247,16 @@ Flag 数量: {flag_count}
             path = path[:8]
             if path and path not in entry["solved_paths"]:
                 entry["solved_paths"].append(path)
-                entry["solved_paths"] = entry["solved_paths"][-5:]
+                # 保留更多成功路径（5→20）：之前 [-5:] 截断导致 42 通关只沉淀 2 条（新顶旧丢弃）
+                entry["solved_paths"] = entry["solved_paths"][-20:]
                 _save_lessons(lessons)
+            # C3 方向级沉淀：agent 最终消息摘要存 notes（方法论级，去 flag 值，防重复）
+            if final_msg and len(final_msg.strip()) > 10:
+                _dir_note = re.sub(r'(?:flag|FLAG|ctf|CTF)\{[^}]{0,200}\}', '[FLAG]', final_msg.strip())[:150]
+                _dir_tag = f"【解题方向】{_dir_note}"
+                if _dir_tag not in entry.get("notes", ""):
+                    entry["notes"] = (entry.get("notes", "") + "\n" + _dir_tag).strip()[:5000]
+                    _save_lessons(lessons)
         elif (result.get("iterations") or 0) >= 10:
             # 真解题失败（跑了不少轮没解出）才记 failed
             entry["failed"] += 1

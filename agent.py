@@ -293,6 +293,8 @@ class Agent:
         self.found_flag = False
         self.submitted = False
         self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
+        self._no_flag_rounds = 0  # 连续无 extract_flag/submit_flag 动作的轮数（B1 失败收敛检测）
+        self._flag_hint_done = False  # 聚焦提 flag 提示只发一次
 
     def _compress_history(self, threshold: int = 40, keep_tail: int = 10, max_len: int = 400):
         """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果截断为摘要。
@@ -394,6 +396,20 @@ class Agent:
                     result_str = result_str + (
                         "\n\n【系统】extract_flag 命中 flag 候选。下一步调用 submit_flag 提交；"
                         "若返回本地模式/失败/错误，说明 flag 不对，继续解题验证真实 flag，不要停止。"
+                    )
+
+            # B1 失败收敛检测：连续 15 轮无 extract_flag/submit_flag 动作 → 提示聚焦提 flag（防盲目 run_shell 空转）
+            if name in ("extract_flag", "submit_flag"):
+                self._no_flag_rounds = 0
+            else:
+                self._no_flag_rounds += 1
+                if self._no_flag_rounds >= 15 and not self._flag_hint_done:
+                    self._flag_hint_done = True
+                    logger.info(f"连续 {self._no_flag_rounds} 轮无 flag 动作，注入聚焦提示")
+                    result_str = result_str + (
+                        "\n\n【聚焦提 flag】已连续 15 轮未调用提取/提交 flag 工具。请聚焦："
+                        "从已探测信息中提取 flag（extract_flag），找到后立即 submit_flag 提交；"
+                        "若当前方向无 flag，换攻击面（其他功能/接口/漏洞入口）。"
                     )
 
             print(f"  📤 {result_str[:300]}{'...' if len(result_str) > 300 else ''}")
@@ -514,11 +530,13 @@ class Agent:
             if stop_event is not None and not stop_event.is_set() and _detect_signal(self.messages):
                 stop_event.set()
             # 任务树/阶段推进提示（PentestGPT 轻量版）：每 10 轮提醒推进阶段（定类→利用→提交），
-            # 防 agent 在探测阶段重复打转（忘记进度重新探测）
-            if self.iteration % 10 == 0 and self.iteration < iter_limit:
+            # A2/D2 探测限轮+提示提前：每 5 轮提醒推进阶段（定类→利用→提交），带题型攻击面方向
+            # （log4-1: 进度提示 183 次但 10 轮太晚/太笼统，23 题仍 50 轮截断）
+            if self.iteration % 5 == 0 and self.iteration < iter_limit:
+                _cat_tip = CATEGORY_TIPS.get((self.category or "").lower(), GENERIC_TIP)
                 phase_hint = (f"【进度推进】已进行 {self.iteration} 轮。请确认当前阶段（定类→利用→提交）："
-                              f"若还在重复探测早期内容，应推进到利用/提交——明确漏洞入口后直接构造利用，"
-                              f"找到 flag 立即 submit_flag 提交。")
+                              f"若还在重复探测早期内容，应推进到利用/提交——{_cat_tip} "
+                              f"明确漏洞入口后直接构造利用，找到 flag 立即 submit_flag 提交。")
                 self.messages.append({"role": "user", "content": phase_hint})
                 print(f"  📌 进度推进提示（第 {self.iteration} 轮，检查阶段）")
 
