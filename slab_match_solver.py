@@ -61,6 +61,8 @@ def _save_progress(progress: Dict) -> None:
 
 # ── 解题经验库（P1 经验沉淀 + P2 失败卡点；方法论级，不含单题答案/flag）──
 LESSONS_FILE = os.path.join(config.OUTPUT_DIR, "slab_lessons.json")
+# 经验库并发锁：两题并行下多个 solve_challenge 线程同时沉淀写 JSON，需串行化防写坏（否则 _load_lessons 解析失败→注入"无"）
+LESSONS_LOCK = threading.Lock()
 
 
 def _load_lessons() -> Dict:
@@ -76,8 +78,9 @@ def _load_lessons() -> Dict:
 
 def _save_lessons(lessons: Dict) -> None:
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    with open(LESSONS_FILE, "w") as f:
-        json.dump(lessons, f, ensure_ascii=False, indent=2)
+    with LESSONS_LOCK:
+        with open(LESSONS_FILE, "w") as f:
+            json.dump(lessons, f, ensure_ascii=False, indent=2)
 
 
 def list_challenges(api: SlabMatchAPI) -> List[Dict]:
