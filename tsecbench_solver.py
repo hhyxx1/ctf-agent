@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import Dict, List
 
 from agent import Agent, build_agent
-from slab_match_solver import _load_lessons
+from slab_match_solver import _load_lessons, _save_lessons
 from utils import tsec_api, load_tb_progress, save_tb_progress
 from config import config
 
@@ -232,7 +232,6 @@ Flag 数量: {flag_count}
     # 沉淀经验（成功存工具路径；真解题失败（跑了不少轮）记 failed；
     # token 耗尽/LLM 失败（iterations 少）不记，避免污染经验库）
     try:
-        from slab_match_solver import _load_lessons, _save_lessons
         lessons = _load_lessons()
         entry = lessons.setdefault(cat, {"solved_paths": [], "failed": 0, "notes": ""})
         if result.get("success") or result.get("flag_found"):
