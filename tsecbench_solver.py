@@ -63,8 +63,8 @@ TB_PROGRESS_LOCK = threading.Lock()
 
 
 def _tb_save(progress) -> None:
-    with TB_PROGRESS_LOCK:
-        _tb_save(progress)
+    # 用户要求：不保存进度文件（每次运行从空开始，不受历史 21/109 影响）
+    pass
 
 
 def _infer_category(unique_code: str, desc: str) -> str:
@@ -374,7 +374,8 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
         return
 
     # 2. 加载进度
-    progress = load_tb_progress()
+    # 不加载历史进度（用户要求：每次运行从空开始）
+    progress = {"solved": [], "failed": [], "in_progress": [], "submitted_flags": {}, "history": []}
     print(f"\n📊 进度: 已解 {len(progress['solved'])}, 失败 {len(progress['failed'])}")
     if timeout_sec > 0:
         print(f"⏱️ 总时限: {timeout_sec/60:.0f}min, 剩 {time_left()/60:.1f}min")
@@ -451,7 +452,8 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
 
 def show_status():
     """显示当前解题进度"""
-    progress = load_tb_progress()
+    # 不加载历史进度（用户要求：每次运行从空开始）
+    progress = {"solved": [], "failed": [], "in_progress": [], "submitted_flags": {}, "history": []}
     print(f"\n📊 TSecBench 解题进度:")
     print(f"  ✅ 已通关: {len(progress['solved'])} 题")
     print(f"  ⚠️ 进行中: {len(progress['in_progress'])} 题")
