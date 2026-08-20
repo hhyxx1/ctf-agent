@@ -56,6 +56,20 @@ def _timeout_handler(signum, frame):
     raise ChallengeTimeout()
 
 
+def _infer_category(unique_code: str, desc: str) -> str:
+    """按描述关键词推断题型（tsecbench 的 unique_code 前缀无法直接映射题型，如 a-05/e1-01）"""
+    text = f"{unique_code} {desc}".lower()
+    if any(k in text for k in ["web", "登录", "上传", "反序列化", "sql", "注入", "防护", "门户", "面板", "系统", "平台", "接口", "api"]):
+        return "web"
+    if any(k in text for k in ["内存安全", "二进制", "溢出", "沙箱", "序列化对象", "内存", "协议"]):
+        return "pwn"
+    if any(k in text for k in ["加密", "密钥", "rsa", "cipher", "密码", "解密"]):
+        return "crypto"
+    if any(k in text for k in ["隐写", "流量", "压缩", "取证", "steg", "文件类型"]):
+        return "misc"
+    return "unknown"
+
+
 def list_challenges() -> List[Dict]:
     """列出所有题目"""
     if not tsec_api.is_configured():
@@ -152,7 +166,7 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
 
     # 2. 构造题目描述（含同类题经验注入，省轮次）
     # 题型从 unique_code 前缀推导（web_/crypto_/pwn_/misc_）
-    cat = (unique_code.split("_")[0] if "_" in unique_code else "unknown").lower()
+    cat = _infer_category(unique_code, desc)
     lessons_hint = ""
     try:
         entry = _load_lessons().get(cat)
