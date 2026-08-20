@@ -21,6 +21,8 @@ import json
 import time
 import signal
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import Dict, List
 
 from agent import Agent, build_agent
@@ -54,6 +56,15 @@ class ChallengeTimeout(Exception):
 
 def _timeout_handler(signum, frame):
     raise ChallengeTimeout()
+
+
+# 进度并发锁：两题并行时多个 solve_challenge 线程同时写进度，需串行化防写坏
+TB_PROGRESS_LOCK = threading.Lock()
+
+
+def _tb_save(progress) -> None:
+    with TB_PROGRESS_LOCK:
+        _tb_save(progress)
 
 
 def _infer_category(unique_code: str, desc: str) -> str:
@@ -132,7 +143,7 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
         else:
             logger.error(f"❌ 启动失败: {err_code} - {err_msg}")
             progress["failed"].append(unique_code)
-            save_tb_progress(progress)
+            _tb_save(progress)
             return {"status": "start_failed", "code": unique_code, "error": err_msg}
 
     # 拉容器地址：start_result 直接拿，拿不到就轮询 list_challenges 等就绪
@@ -158,7 +169,7 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
     if not container_addrs:
         logger.error(f"❌ 无法获取 {unique_code} 的容器地址")
         progress["failed"].append(unique_code)
-        save_tb_progress(progress)
+        _tb_save(progress)
         return {"status": "no_container", "code": unique_code}
 
     addr_str = ", ".join(container_addrs)
@@ -329,7 +340,7 @@ Flag 数量: {flag_count}
         "timestamp": time.strftime("%H:%M:%S"),
     })
 
-    save_tb_progress(progress)
+    _tb_save(progress)
 
     print(f"\n[5/5] 完成: {status}")
 
@@ -379,41 +390,52 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
         ch.get("level", 99),
     ))
 
-    # 4. 逐题解题
+    # 4. 逐题解题（持续填槽两题并行：同时最多 2 题在途，完成补下一题，卡题不阻塞）
     stats = {"solved": 0, "partial": 0, "failed": 0, "skipped": 0}
-    # 留 3min 兇底收尾，避免平台沙箱超时被强杀
+    # 留 3min 兜底收尾，避免平台沙箱超时被强杀
     safety_margin = 180
+    MAX_INFLIGHT = 2
+    inflight = {}
+    idx = 0
 
-    for i, ch in enumerate(challenges, 1):
-        # 超时守护: 剩余时间不足（< safety_margin）时停止开新题
-        left = time_left()
-        if left < safety_margin:
-            print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min < {safety_margin/60:.0f}min 兇底)，停止开新题")
-            # 尝试关闭所有可能还在运行的容器
-            try:
-                for code in progress.get("in_progress", [])[:5]:
-                    tsec_api.close_challenge(code)
-            except Exception:
-                pass
-            break
+    def _fill_slots(ex, inflight, idx):
+        """预启动 + 填槽提交，保持 MAX_INFLIGHT 题在途（一题完成补下一题）"""
+        while idx < len(challenges) and len(inflight) < MAX_INFLIGHT:
+            left = time_left()
+            if left < safety_margin:
+                print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min < {safety_margin/60:.0f}min 兜底)，停止开新题")
+                try:
+                    for code in progress.get("in_progress", [])[:5]:
+                        tsec_api.close_challenge(code)
+                except Exception:
+                    pass
+                return idx
+            ch = challenges[idx]
+            print(f"\n{'#'*60}")
+            print(f"  题目 {idx+1}/{len(challenges)}  (剩 {left/60:.1f}min)")
+            print(f"{'#'*60}")
+            f = ex.submit(solve_challenge, ch, progress)
+            inflight[f] = ch
+            idx += 1
+        return idx
 
-        print(f"\n{'#'*60}")
-        print(f"  题目 {i}/{len(challenges)}  (剩 {left/60:.1f}min)")
-        print(f"{'#'*60}")
-
-        try:
-            result = solve_challenge(ch, progress)
-            stats[result["status"]] = stats.get(result["status"], 0) + 1
-        except KeyboardInterrupt:
-            print("\n\n⚠️ 用户中断，保存进度...")
-            save_tb_progress(progress)
-            break
-        except Exception as e:
-            logger.error(f"❌ �目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
-            stats["failed"] = stats.get("failed", 0) + 1
-
-        # �題目之间稍微停顿，避免请求过快
-        time.sleep(2)
+    with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as ex:
+        idx = _fill_slots(ex, inflight, idx)
+        while inflight:
+            done, _ = wait(list(inflight.keys()), return_when=FIRST_COMPLETED)
+            for f in done:
+                ch = inflight.pop(f)
+                try:
+                    result = f.result()
+                    stats[result["status"]] = stats.get(result["status"], 0) + 1
+                except KeyboardInterrupt:
+                    print("\n\n⚠️ 用户中断，保存进度...")
+                    _tb_save(progress)
+                    return
+                except Exception as e:
+                    logger.error(f"❌ 题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
+                    stats["failed"] = stats.get("failed", 0) + 1
+            idx = _fill_slots(ex, inflight, idx)
 
     # 5. 汇总
     elapsed = time.time() - start_time
