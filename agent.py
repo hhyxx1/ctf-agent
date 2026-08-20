@@ -502,6 +502,14 @@ class Agent:
             # 置事件通知其他并行方向提前停止（省 token）
             if stop_event is not None and not stop_event.is_set() and _detect_signal(self.messages):
                 stop_event.set()
+            # 任务树/阶段推进提示（PentestGPT 轻量版）：每 10 轮提醒推进阶段（定类→利用→提交），
+            # 防 agent 在探测阶段重复打转（忘记进度重新探测）
+            if self.iteration % 10 == 0 and self.iteration < iter_limit:
+                phase_hint = (f"【进度推进】已进行 {self.iteration} 轮。请确认当前阶段（定类→利用→提交）："
+                              f"若还在重复探测早期内容，应推进到利用/提交——明确漏洞入口后直接构造利用，"
+                              f"找到 flag 立即 submit_flag 提交。")
+                self.messages.append({"role": "user", "content": phase_hint})
+                print(f"  📌 进度推进提示（第 {self.iteration} 轮，检查阶段）")
 
         status = {
             "success": self.submitted,
