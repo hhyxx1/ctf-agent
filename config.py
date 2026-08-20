@@ -119,7 +119,7 @@ class Config:
     SLAB_ACCESS_KEY: str = os.getenv("SLAB_ACCESS_KEY", "")  # Agent 专用 AccessKey
 
     # ── Agent 行为 ──
-    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "500"))
+    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "50"))
     # 并行方向 Agent 的轮次上限（多方向并行时每个方向各跑这么多轮；难题需要更多轮）
     PARALLEL_ROUNDS: int = int(os.getenv("PARALLEL_ROUNDS", "100"))
     # 单 Agent 动态评估窗口：先跑这么多轮，无解出迹象则动态切多方向并行（替代固定 30 轮）
