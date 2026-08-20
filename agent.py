@@ -365,7 +365,18 @@ class Agent:
             # 返回「本地模式/失败」时不要设 submitted，让 Agent 继续解题
             if name == "submit_flag":
                 if "提交成功" in result_str or "correct" in str(result_str).lower():
-                    self.submitted = True
+                    # 多 flag 题：提交成功但还有未提交的 flag → 不停止，提示继续找剩余 flag
+                    _mc = re.search(r'"correct_flag_count":\s*(\d+)', result_str)
+                    _tc = re.search(r'"total_flag_count":\s*(\d+)', result_str)
+                    if _mc and _tc and int(_mc.group(1)) < int(_tc.group(1)):
+                        logger.info(f"多 flag 题：已提交 {_mc.group(1)}/{_tc.group(1)}，继续找其他 flag")
+                        result_str = result_str + (
+                            f"\n\n【系统】该题共 {_tc.group(1)} 个 flag，已提交 {_mc.group(1)} 个，"
+                            f"还有 {int(_tc.group(1)) - int(_mc.group(1))} 个未找到。"
+                            "继续解题找剩余 flag，找到后逐个 submit_flag 提交，直到全部 flag 提交成功。"
+                        )
+                    else:
+                        self.submitted = True
                 else:
                     # 本地模式/失败：给 Agent 明确反馈，让它继续解题而不是空转
                     logger.info("submit_flag 未真正提交成功，Agent 继续解题")
