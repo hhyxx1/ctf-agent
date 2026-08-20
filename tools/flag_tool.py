@@ -74,9 +74,20 @@ def submit_flag(flag: str, challenge_id: str = "") -> str:
     """提交 flag"""
     logger.info(f"提交 flag: {flag}, challenge_id: {challenge_id}")
 
-    # 通过统一的比赛 API 接口提交
-    from utils.competition_api import api
-    result = api.submit_flag(flag, challenge_id)
+    # 分派：tsecbench 平台（BENCHMARK_TOKEN 已配置）→ tsec_api 正式提交
+    # （POST /openapi/v1/challenges/submit + unique_code——否则 agent 内提交 404，
+    #   导致"找到 flag 还继续解题"浪费轮次）；
+    # 否则 → 统一的比赛 API（slab / 本地模式）
+    try:
+        from utils.tsecbench_api import tsec_api
+        if tsec_api.is_configured():
+            result = tsec_api.submit_flag(challenge_id, flag)
+        else:
+            from utils.competition_api import api
+            result = api.submit_flag(flag, challenge_id)
+    except Exception as e:
+        logger.error(f"submit_flag 异常: {e}")
+        return f"[提交失败] {e}"
 
     # 本地模式优先判断：competition_api 未配置时返回 {"status":"local"}，
     # 不能误判为提交成功（否则 Agent 会以为已提交而停止）
