@@ -46,7 +46,7 @@ def extract_flag(text: str) -> str:
         return "[未找到 flag] 文本中没有匹配 flag{...} 格式的内容"
 
     unique = list(dict.fromkeys(found))
-    result = f"[找到 {len(unique)} 个 flag]\n"
+    result = f"[找到 {len(unique)} 个 flag]（来源文本: {text[:80]}{'...' if len(text)>80 else ''}）\n"
     for i, flag in enumerate(unique, 1):
         result += f"  {i}. {flag}\n"
     return result.strip()
@@ -73,6 +73,14 @@ def extract_flag(text: str) -> str:
 def submit_flag(flag: str, challenge_id: str = "") -> str:
     """提交 flag"""
     logger.info(f"提交 flag: {flag}, challenge_id: {challenge_id}")
+
+    # P1-① 证据驱动防误报：submit_flag 前校验 flag 格式
+    # flag 必须匹配合法格式（flag{...} 且内容长度合理），防 LLM 幻觉编造垃圾 flag
+    _f = flag.strip()
+    if not re.match(r'^(flag|FLAG|ctf|CTF)\{[^\}]{4,}\}$', _f):
+        return f"[拒绝提交] flag 格式异常: {_f[:60]}...（疑似 LLM 幻觉编造，请通过漏洞利用复现确认真实 flag）"
+    if any(ord(c) < 32 or ord(c) > 126 for c in _f[5:-1]):
+        return f"[拒绝提交] flag 内含非 ASCII 字符，疑似乱码：{_f[:60]}..."
 
     # 分派：tsecbench 平台（BENCHMARK_TOKEN 已配置）→ tsec_api 正式提交
     # （POST /openapi/v1/challenges/submit + unique_code——否则 agent 内提交 404，

@@ -209,7 +209,13 @@ Flag 数量: {flag_count}
 - 靶场地址通过 VPN 直连访问
 - 这道题有 {flag_count} 个 flag，需要分别获取和提交
 - 找到 flag 后必须调用 submit_flag 提交，flag 格式一般为 flag{{...}}
-- 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
+## 标准解题流程
+1. **fingerprint**（第一步）: 先识别目标组件/框架（curl -I / http_request / web_fingerprint）
+2. **first-try**（第二步）: 按组件调对应工具链（Web→登录/LFI/SQL注入；Pwn→逆向/exploit；Crypto→编码/算法）
+3. **source**（第三步）: 用 LFI/文件读取等手段获取源码，分析业务逻辑找入口
+4. **exploit**（第四步）: 针对发现的漏洞构造利用，找到可疑点后至少复现 2 次确认
+5. **submit**（第五步）: 提交前验证 flag 格式（flag{{...}}），调用 submit_flag 提交
+6. **注意**: 如果卡住可以尝试不同方向，不要在一种方法上死磕"""
 
     # 3. Agent 解题（按题型分派子 Agent：专用 prompt + 工具子集 + 经验注入）
     print(f"\n[2/5] Agent 解题...")
@@ -329,6 +335,19 @@ Flag 数量: {flag_count}
         status = "failed"
         progress["failed"].append(unique_code)
 
+    # P2-⑤ 进度回收（MoMo-agent 借鉴）：agent 失败/超时时把 partial 发现存进经验库（不白跑）
+    if final_msg and len(final_msg.strip()) > 10 and status in ("failed", "partial"):
+        try:
+            _partial = re.sub(r'(?:flag|FLAG|ctf|CTF)\{[^}]{0,200}\}', '[FLAG]', final_msg.strip())[:150]
+            _partial_tag = f"【partial 发现 {unique_code}】{_partial}"
+            lessons = _load_lessons()
+            entry = lessons.setdefault(cat, {"solved_paths": [], "failed": 0, "notes": ""})
+            if _partial_tag not in entry.get("notes", ""):
+                entry["notes"] = (entry.get("notes", "") + "\n" + _partial_tag).strip()[:5000]
+                _save_lessons(lessons)
+        except Exception:
+            pass
+
     # 5. 关闭容器（释放资源）
     print(f"\n[4/5] 关闭容器...")
     close_result = tsec_api.close_challenge(unique_code)
@@ -444,6 +463,46 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                     logger.error(f"❌ 题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
                     stats["failed"] = stats.get("failed", 0) + 1
             idx = _fill_slots(ex, inflight, idx)
+
+    # P2-④ 两轮制重试（MoMo-agent 借鉴）：跑完一轮后，第二轮优先重试 failed 题
+    retry_list = [code for code in progress.get("failed", [])
+                  if not progress.get("submitted_flags", {}).get(code)]
+    if retry_list:
+        print(f"\n🔄 第二轮重试: {len(retry_list)} 道未解出题 ({', '.join(retry_list[:5])}...)")
+        stats["retry_round"] = True
+        retry_inflight = {}
+        retry_idx = 0
+        retry_failed = list(retry_list)
+
+        def _retry_fill():
+            nonlocal retry_idx
+            while retry_idx < len(retry_failed) and len(retry_inflight) < MAX_INFLIGHT:
+                if time.time() - start_time + safety_margin > timeout_sec:
+                    break
+                code = retry_failed[retry_idx]
+                challenge = next((c for c in challenges if c.get("unique_code") == code), None)
+                retry_idx += 1
+                if not challenge:
+                    continue
+                print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
+                f = ex.submit(solve_challenge, challenge, progress)
+                retry_inflight[f] = challenge
+            return retry_idx
+
+        retry_idx = _retry_fill()
+        while retry_inflight:
+            done, _ = wait(list(retry_inflight.keys()), return_when=FIRST_COMPLETED)
+            for f in done:
+                ch = retry_inflight.pop(f)
+                try:
+                    result = f.result()
+                    stats[result["status"]] = stats.get(result["status"], 0) + 1
+                except Exception as e:
+                    logger.error(f"❌ 重试题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
+                    stats["failed"] = stats.get("failed", 0) + 1
+            retry_idx = _retry_fill()
+    else:
+        print("\n✅ 所有题目已解决，无需重试。")
 
     # 5. 汇总
     elapsed = time.time() - start_time
