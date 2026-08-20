@@ -213,21 +213,18 @@ Flag 数量: {flag_count}
     # 3. Agent 解题（按题型分派子 Agent：专用 prompt + 工具子集 + 经验注入）
     print(f"\n[2/5] Agent 解题...")
     agent = build_agent(cat)
-    # 单题整体超时兜底：防止某一步（工具/LLM）意外卡死拖死整个评测
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(_challenge_timeout(diff))
+    # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
+    # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
         result = agent.run(task)
-    except ChallengeTimeout:
-        logger.error(f"⏱️ {unique_code} 单题超时（{CHALLENGE_TIMEOUT_SEC}s），放弃该题")
+    except Exception as e:
+        logger.error(f"❌ {unique_code} 解题异常: {e}")
         result = {
             "success": False,
             "flag_found": False,
             "iterations": agent.iteration,
-            "final_message": f"[单题超时，{CHALLENGE_TIMEOUT_SEC}s 内未解出，放弃]",
+            "final_message": f"[解题异常: {e}]",
         }
-    finally:
-        signal.alarm(0)
 
     agent_success = result.get("success", False)
     final_msg = result.get("final_message", "")
