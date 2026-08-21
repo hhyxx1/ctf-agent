@@ -10,7 +10,7 @@ from tools.forensics_tool import analyze_file, steg_check
 from tools.web_tool import http_request, sqli_scan, dir_scan
 from tools.pentest_tool import (
     nmap_scan, hydra_brute, web_fingerprint,
-    vuln_scan, linpeas_check, proxy_scan,
+    vuln_scan, linpeas_check, proxy_scan, service_vuln_scan,
 )
 from tools.binary_tool import (
     binary_analyze, ghidra_decompile,
@@ -38,7 +38,7 @@ __all__ = [
     "http_request", "sqli_scan", "dir_scan",
     # Pentest
     "nmap_scan", "hydra_brute", "web_fingerprint",
-    "vuln_scan", "linpeas_check", "proxy_scan",
+    "vuln_scan", "linpeas_check", "proxy_scan", "service_vuln_scan",
     # Binary
     "binary_analyze", "ghidra_decompile",
     "vuln_pattern_scan", "rop_gadget_search", "exploit_template",

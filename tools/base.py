@@ -134,7 +134,8 @@ def store_exec_cache(key: str, result: str):
 # 题型工具映射（子 Agent 按题型优先生成；分类错时靠通用兜底解，不会无解）
 CATEGORY_TOOLS = {
     "web": ["http_request", "dir_scan", "web_fingerprint", "sqli_scan", "vuln_scan",
-            "proxy_scan", "nmap_scan", "hydra_brute", "ssrf_metadata", "run_shell"],
+            "proxy_scan", "nmap_scan", "hydra_brute", "ssrf_metadata", "service_vuln_scan",
+            "run_shell"],
     "pwn": ["binary_analyze", "exploit_template", "rop_gadget_search", "vuln_pattern_scan",
             "ghidra_decompile", "shellcode_encode", "msfvenom_payload", "run_python", "run_shell"],
     "crypto": ["rsa_decrypt", "auto_decode", "encode_data", "run_python", "run_shell"],
