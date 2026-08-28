@@ -95,6 +95,7 @@ class LLM:
             api_key=config.LLM_API_KEY,
             base_url=self._openai_base(config.LLM_BASE_URL),
             timeout=config.LLM_TIMEOUT,
+            max_retries=0,  # 重试统一由本层控制（SDK 内部重试太短，429 时白白消耗 RPM 配额）
         )
         self.max_retries = max(1, config.LLM_MAX_RETRIES)
         self.backoff_base = config.LLM_BACKOFF_BASE_SEC
@@ -188,6 +189,11 @@ class LLM:
                 wait = _retry_after_seconds(e)
                 if wait <= 0:
                     wait = self.backoff_base * (2 ** attempt) + random.uniform(0, self.backoff_base)
+                # 429/rpm 限流：服务端没给 Retry-After 时，短退避无意义（RPM 窗口是 60s），
+                # 保底等 30s，否则像 sensenova 'rpm exhausted' 这种会在 ~10s 内烧光 3 次重试直接放弃
+                _err_str = str(e).lower()
+                if wait < 30 and ("rpm" in _err_str or "429" in _err_str or "rate limit" in _err_str):
+                    wait = max(wait, 30.0)
                 wait = min(wait, 300)  # 单次最长等 5min，避免卡死整轮
                 logger.warning(f"LLM 调用失败 ({_classify_error(e)}, attempt {attempt+1}/{self.max_retries}): {e}, {wait:.1f}s 后重试")
                 time.sleep(wait)

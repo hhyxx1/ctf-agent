@@ -29,6 +29,7 @@ from typing import Dict, List
 from agent import build_agent
 from llm import LLMQuotaExhausted
 from slab_match_solver import _load_lessons, _save_lessons
+from tools.flag_tool import filter_flags
 from utils import tsec_api
 from config import config
 
@@ -47,8 +48,13 @@ def _update_progress(progress, mutate):
         mutate(progress)
 
 
+# 在途容器登记（unique_code → True）：双击 Ctrl+C 打断收尾时仍能清理，防容器泄漏
+_ACTIVE_CONTAINERS: Dict[str, bool] = {}
+
+
 def _safe_close(unique_code: str) -> bool:
     """关闭容器释放资源（失败不抛异常，避免干扰主流程）。"""
+    _ACTIVE_CONTAINERS.pop(unique_code, None)
     try:
         res = tsec_api.close_challenge(unique_code)
         if isinstance(res, dict) and res.get("closed"):
@@ -58,6 +64,15 @@ def _safe_close(unique_code: str) -> bool:
     except Exception as e:
         logger.warning(f"关闭容器异常 {unique_code}: {e}")
     return False
+
+
+def _close_all_active() -> int:
+    """中断收尾兜底：关闭所有仍在登记中的容器，返回尝试关闭的数量。"""
+    codes = list(_ACTIVE_CONTAINERS.keys())
+    for code in codes:
+        print(f"  🧹 清理残留容器: {code}")
+        _safe_close(code)
+    return len(codes)
 
 
 # ── 运行日志导出 ──────────────────────────────────────────────────────────
@@ -71,6 +86,21 @@ TB_LOG_MANIFEST = os.path.join(TB_LOG_DIR, "manifest.json")
 
 def _safe_name(unique_code: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", unique_code)
+
+
+def _dump_json(obj, path: str) -> None:
+    """原子写 JSON：先序列化到临时文件再 rename。
+
+    - 直接 open+json.dump 是流式写入，中途抛异常会留下半个文件（之前 a-05.json
+      因 run_log 里有 set 触发 'Object of type set is not JSON serializable'
+      中断在半路 → JSONDecodeError）
+    - default 兜底把 set/frozenset 转有序列表，其他未知类型转字符串
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2,
+                  default=lambda o: sorted(o) if isinstance(o, (set, frozenset)) else str(o))
+    os.replace(tmp, path)
 
 
 def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
@@ -136,8 +166,7 @@ def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
 
     path = os.path.join(TB_LOG_DIR, f"{_safe_name(unique_code)}.json")
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(log, f, ensure_ascii=False, indent=2)
+        _dump_json(log, path)
     except Exception as e:
         print(f"  ⚠️ 日志导出失败: {e}")
         return ""
@@ -164,8 +193,7 @@ def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
             # 按题去重：重试/重跑同题时覆盖旧条目，只保留最终结果
             manifest = [m for m in manifest if m.get("unique_code") != unique_code]
             manifest.append(entry)
-            with open(TB_LOG_MANIFEST, "w", encoding="utf-8") as f:
-                json.dump(manifest, f, ensure_ascii=False, indent=2)
+            _dump_json(manifest, TB_LOG_MANIFEST)
     except Exception:
         pass  # 清单写入失败不影响主流程
 
@@ -234,8 +262,7 @@ def export_run_summary(progress: Dict, start_time: float) -> str:
     os.makedirs(TB_LOG_DIR, exist_ok=True)
     out_path = os.path.join(TB_LOG_DIR, "RUN_SUMMARY.json")
     try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
+        _dump_json(summary, out_path)
     except Exception as e:
         print(f"  ⚠️ 总览导出失败: {e}")
         return ""
@@ -429,6 +456,7 @@ def solve_challenge(challenge: Dict, progress: Dict, retry_hint: str = "", retry
 
     addr_str = ", ".join(container_addrs)
     print(f"  容器地址: {addr_str}")
+    _ACTIVE_CONTAINERS[unique_code] = True  # 登记，供中断兜底清理
 
     # T1-③ 预侦察（确定性脚本，失败不影响解题流程）
     prerecon_report = ""
@@ -579,6 +607,8 @@ Flag 数量: {flag_count}
             found_flags.update(re.findall(pattern, all_text))
         except re.error:
             pass
+    # 丢弃 flag{...}/flag{xxx} 占位符（之前把文档示例 "flag{...}" 提交给平台吃了 ❌）
+    found_flags = set(filter_flags(found_flags))
 
     submit_results = []
     for flag in found_flags:
@@ -813,6 +843,9 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
     except KeyboardInterrupt:
         # with 块退出时 shutdown(wait=True) 会等在途题自行收尾（关容器/导出日志），随后继续汇总
         print("\n\n⚠️ 用户中断，等待在途题收尾...")
+    finally:
+        # 兜底：无论正常结束还是中断（含第二次 Ctrl+C 打断等待），都清掉登记中未关的容器
+        _close_all_active()
 
     # 5. 汇总
     elapsed = time.time() - start_time

@@ -17,8 +17,25 @@ FLAG_PATTERNS = [
     r"hkcert\d*\{[^}]+\}",
     r"HCKERT\d*\{[^}]+\}",
     r"intigriti\{[^}]+\}",
-    r"[A-Za-z0-9_]+\{[^}]{6,}\}",  # 兜底：任意 前缀{内容} 且内容>=6 字符
+    # 兜底：任意 前缀{内容} 且内容 6-120 字符。排除分号/引号/花括号/空格——
+    # 否则 CSS 片段（body{color:#000;...}、h1{border-right:1px solid ...}）
+    # 和 JS 代码（try{let a=...}）会被当 flag 提交；真 flag 极少含空格
+    r"[A-Za-z0-9_]{2,}\{[^{};\"'` ]{6,120}\}",
 ]
+
+# 占位符/文档示例 flag（flag{...}、flag{xxx}、FLAG{____} 等），提取后应丢弃
+_PLACEHOLDER_RE = re.compile(r"[.\s_xX*<>?]{1,}")
+
+
+def filter_flags(candidates):
+    """过滤占位符 flag（内容只有 .../xxx/___ 之类的），返回去重后的真实候选列表。"""
+    out = []
+    for f in dict.fromkeys(candidates):
+        m = re.match(r"^[^{}]+\{(.+)\}$", f or "")
+        if not m or _PLACEHOLDER_RE.fullmatch(m.group(1)):
+            continue
+        out.append(f)
+    return out
 
 
 @register_tool(

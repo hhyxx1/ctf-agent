@@ -8,7 +8,7 @@ from typing import List, Dict
 from config import config
 from llm import llm, LLMQuotaExhausted
 from tools import get_tools_schema, execute_tool
-from tools.flag_tool import FLAG_PATTERNS
+from tools.flag_tool import FLAG_PATTERNS, filter_flags
 from utils.knowledge_base import search_knowledge
 
 logger = logging.getLogger(__name__)
@@ -468,6 +468,7 @@ class Agent:
                 found.extend(re.findall(pat, raw_result))
             except re.error:
                 pass
+        found = filter_flags(found)  # 丢弃 flag{...}/flag{xxx} 之类占位符
         outs = []
         for flag in dict.fromkeys(found):
             if flag in self._auto_submitted:
@@ -476,7 +477,11 @@ class Agent:
             _t0 = time.time()
             sr = execute_tool("submit_flag", {"flag": flag, "challenge_id": self.challenge_id})
             sr_str = str(sr)
-            ok = "[提交成功]" in sr_str
+            # 「提交成功」只代表平台收到；是否真的正确要看 correct_flag_count（为 0 就是错的，
+            # 之前 CSS 片段被判「成功」就是这个原因——平台对任何格式都返回提交成功）
+            _mc = re.search(r'"correct_flag_count":\s*(\d+)', sr_str)
+            _tc = re.search(r'"total_flag_count":\s*(\d+)', sr_str)
+            ok = "[提交成功]" in sr_str and (_mc is None or int(_mc.group(1)) > 0)
             if self._run_log:
                 self._run_log[-1]["tool_calls"].append({
                     "name": "_auto_submit",
@@ -488,8 +493,6 @@ class Agent:
             logger.info(f"自动提交 flag: {flag} → {'成功' if ok else '不正确'}")
             if ok:
                 self.found_flag = True
-                _mc = re.search(r'"correct_flag_count":\s*(\d+)', sr_str)
-                _tc = re.search(r'"total_flag_count":\s*(\d+)', sr_str)
                 if not (_mc and _tc and int(_mc.group(1)) < int(_tc.group(1))):
                     self.submitted = True
                     if self._solved_event:
