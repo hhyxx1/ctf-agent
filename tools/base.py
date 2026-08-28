@@ -17,6 +17,11 @@ TOOL_REGISTRY = {}
 _DEFAULT_FORBIDDEN = [
     "metadata/solution",                        # 常见 CTF 标准答案目录
     "solution/flag.txt",
+    # 本机运行框架文件：agent 读这些不是解题（无靶场时乱翻/找环境信息），
+    # 拦掉防止翻到其他平台配置（如 tsecbench 残留）去调无关 API 浪费轮次
+    ".env",                                     # 含全部 API Key/Token，严禁读取
+    "config.py",
+    "tasks.json",
 ]
 FORBIDDEN_PATHS = list(getattr(config, "FORBIDDEN_PATHS", None) or _DEFAULT_FORBIDDEN)
 # 禁止读取的结果/答案文件（output 下的 json 含正确答案与审计结论）
@@ -26,10 +31,46 @@ FORBIDDEN_FILES = [
     "src_audit_xben.json",
     "src_audit_cybench.json",
     "tsecbench_progress.json",
+    "slab_lessons.json",
+    "slab_progress.json",
 ]
 # 合法工作目录（runner 复制题目的临时目录），允许访问
 ALLOWED_WORKDIRS = list(getattr(config, "ALLOWED_WORKDIRS", None) or ["/tmp/"])
 AUDIT_LOG = os.path.join(config.OUTPUT_DIR, "anti_cheat.log")
+
+# ── 比赛外联限制（规则：所有通信须经平台白名单端点，禁止与外部通信，后期流量审计）──
+# 外部站点黑名单：agent 不得访问（搜索引擎/社区/社交等，读了也不解题，且违规）
+EXTERNAL_BLOCKLIST = [
+    "baidu.com", "google.com", "bing.com", "duckduckgo.com", "yahoo.com",
+    "github.com", "stackoverflow.com", "wikipedia.org", "youtube.com",
+    "csdn.net", "bilibili.com", "zhihu.com", "weibo.com", "qq.com",
+    "taobao.com", "jd.com", "gitee.com", "gitlab.com",
+]
+# 平台白名单端点（Agent 允许访问的平台域名）
+ALLOWED_PLATFORM_HOSTS = [
+    "pro.dasctf.com", "llm-gateway.dasctf.com", "tsecbench.zc.tencent.com",
+]
+
+
+def _check_external_access(text: str) -> str | None:
+    """比赛外联检查：命令/请求若引用外部站点域名 → 返回拦截消息；否则 None。
+
+    规则依据：比赛要求所有通信经平台白名单端点，禁止与队伍外部通信/访问外部站点，
+    后期流量审计。靶场 IP/平台端点不在黑名单，正常解题不受影响。
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    for host in EXTERNAL_BLOCKLIST:
+        if host in lower:
+            msg = (
+                f"[外联拦截] 命令/请求引用了外部站点 {host}——比赛规则禁止与外部通信，"
+                f"所有网络请求将被审计，已拒绝执行。请只访问靶场地址和平台端点。"
+            )
+            _audit_write(f"{time.strftime('%H:%M:%S')} [EXT-BLOCK] {host} text={text[:300]}")
+            logger.warning(msg)
+            return msg
+    return None
 
 
 def _audit_write(line: str):
@@ -135,15 +176,22 @@ def store_exec_cache(key: str, result: str):
 CATEGORY_TOOLS = {
     "web": ["http_request", "dir_scan", "web_fingerprint", "sqli_scan", "vuln_scan",
             "proxy_scan", "nmap_scan", "hydra_brute", "ssrf_metadata", "service_vuln_scan",
+            "full_recon", "searchsploit_query", "jwt_tool", "flask_unsign", "php_filter_chain",
             "run_shell"],
     "pwn": ["binary_analyze", "exploit_template", "rop_gadget_search", "vuln_pattern_scan",
-            "ghidra_decompile", "shellcode_encode", "msfvenom_payload", "run_python", "run_shell"],
-    "crypto": ["rsa_decrypt", "auto_decode", "encode_data", "run_python", "run_shell"],
-    "misc": ["steg_check", "analyze_file", "run_shell", "auto_decode", "encode_data"],
+            "ghidra_decompile", "shellcode_encode", "msfvenom_payload",
+            "pwn_triage", "libc_identify", "one_gadget", "gdb_debug", "pwn_local_setup",
+            "run_python", "run_shell"],
+    "crypto": ["rsa_decrypt", "auto_decode", "encode_data",
+               "classical_cipher", "lattice_lll", "run_python", "run_shell"],
+    "misc": ["steg_check", "analyze_file", "auto_decode", "encode_data",
+             "pcap_triage", "memory_triage", "audio_steg", "qr_decode", "pdf_office_analyze",
+             "hash_crack", "classical_cipher", "run_python", "run_shell"],
 }
 # 通用兜底工具：所有子 Agent 都有（run_shell 万能可解一切，分类错不无解）
 COMMON_TOOLS = ["run_shell", "read_file", "write_file", "http_request", "run_python",
-                "list_dir", "analyze_file", "extract_flag", "submit_flag"]
+                "list_dir", "analyze_file", "extract_flag", "submit_flag",
+                "check_conn", "wordlist", "full_recon", "env_selfcheck", "searchsploit_query"]
 
 
 def get_tools_schema(category: str = ""):

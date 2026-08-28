@@ -42,7 +42,7 @@ def _build_simple_chars():
 # —— Function constructor 反射构造任意字符 ——
 # Function = []["filter"]["constructor"]
 # "filter" = f(0)+i(5)+l(2)+t(0)+e(4)+r(1) 从 false/true/undefined 拼
-def _build_constructor chars(chars):
+def _build_constructor_chars(chars):
     pass  # 占位
 
 

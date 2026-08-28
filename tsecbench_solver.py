@@ -6,66 +6,241 @@
 标准流程:
 1. 列出所有题目
 2. 按难度排序（先做 easy）
-3. 同时最多启动 3 道题
+3. 同时最多 2 道题在途（完成一道补下一道，不阻塞）
 4. 每道题: 启动容器 → Agent 解题 → 提交 flag → 关闭容器
 5. 多 flag 的题目: 多次提交直到 correct_flag_count == flag_count
-6. 进度持久化，支持断点续跑
+6. 两轮制重试：第一轮全量跑完后，第二轮优先重试未解出的题
+7. 进度仅在内存中维护（不落盘，每次运行从空开始）；每题运行细节导出到 output/logs_<run>/
 
 用法:
   python main.py tsecbench          运行完整解题循环
   python main.py tsecbench-list     仅列出题目
-  python main.py tsecbench-status   查看解题进度
+  python main.py tsecbench-status   查看解题进度（仅本次进程内，历史不落盘）
 """
 import os
 import json
 import re
 import time
-import signal
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import Dict, List
 
-from agent import Agent, build_agent
+from agent import build_agent
+from llm import LLMQuotaExhausted
 from slab_match_solver import _load_lessons, _save_lessons
-from utils import tsec_api, load_tb_progress, save_tb_progress
+from utils import tsec_api
 from config import config
 
 logger = logging.getLogger(__name__)
 
-# 同时最多启动的题目数
-MAX_CONCURRENT = 3
-
-# 单题最大尝试次数
-MAX_ATTEMPTS_PER_CHALLENGE = 3
-
-# 单题整体超时（秒）：超过则放弃该题，避免一道题拖死整个评测
-# 默认按难度分配: easy 快速试错, hard 给足时间; 显式设置 CHALLENGE_TIMEOUT_SEC 则全局覆盖
-_DEFAULT_CHALLENGE_TIMEOUT = int(os.getenv("CHALLENGE_TIMEOUT_SEC", "0"))
-
-
-def _challenge_timeout(difficulty: str = "") -> int:
-    if _DEFAULT_CHALLENGE_TIMEOUT > 0:
-        return _DEFAULT_CHALLENGE_TIMEOUT
-    return {"easy": 360, "medium": 600, "hard": 900, "expert": 1200}.get(difficulty, 600)
-
-
-class ChallengeTimeout(Exception):
-    """单题超时信号"""
-    pass
-
-
-def _timeout_handler(signum, frame):
-    raise ChallengeTimeout()
-
-
-# 进度并发锁：两题并行时多个 solve_challenge 线程同时写进度，需串行化防写坏
+# 进度并发锁：多题并行时多个 solve_challenge 线程同时写内存 progress，需串行化防列表写坏
 TB_PROGRESS_LOCK = threading.Lock()
 
 
-def _tb_save(progress) -> None:
-    # 用户要求：不保存进度文件（每次运行从空开始，不受历史 21/109 影响）
-    pass
+def _update_progress(progress, mutate):
+    """在进度锁内执行一次 progress 变更，避免并发线程写坏列表/字典。
+
+    用法: _update_progress(progress, lambda p: p["solved"].append(code))
+    """
+    with TB_PROGRESS_LOCK:
+        mutate(progress)
+
+
+def _safe_close(unique_code: str) -> bool:
+    """关闭容器释放资源（失败不抛异常，避免干扰主流程）。"""
+    try:
+        res = tsec_api.close_challenge(unique_code)
+        if isinstance(res, dict) and res.get("closed"):
+            print(f"  容器已关闭")
+            return True
+        print(f"  ⚠️ 关闭失败: {res}")
+    except Exception as e:
+        logger.warning(f"关闭容器异常 {unique_code}: {e}")
+    return False
+
+
+# ── 运行日志导出 ──────────────────────────────────────────────────────────
+# 每次跑完导出到 output/logs_<run>/，单题一份 JSON + 一份总览 RUN_SUMMARY.json
+
+TB_RUN_ID = time.strftime("%Y%m%d_%H%M%S")
+TB_LOG_DIR = os.path.join("output", f"logs_{TB_RUN_ID}")
+TB_LOG_MANIFEST = os.path.join(TB_LOG_DIR, "manifest.json")
+
+
+def _safe_name(unique_code: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", unique_code)
+
+
+def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
+                          result: Dict, agent, task: str, status: str,
+                          found_flags: List[str], submit_results: List[Dict],
+                          container_addrs: List[str], start_ts: float) -> str:
+    """把单题 agent 全过程（输入/输出/工具调用/token/耗时）导出为一份 JSON。"""
+    os.makedirs(TB_LOG_DIR, exist_ok=True)
+
+    run_log = result.get("run_log", []) or []
+    total_prompt = sum(r.get("usage", {}).get("prompt_tokens") or 0 for r in run_log)
+    total_completion = sum(r.get("usage", {}).get("completion_tokens") or 0 for r in run_log)
+    llm_calls = len(run_log)
+    tool_calls_total = sum(len(r.get("tool_calls", [])) for r in run_log)
+    llm_time = round(sum(r.get("llm_elapsed_sec") or 0 for r in run_log), 2)
+    tool_time = round(sum(tc.get("elapsed_sec") or 0 for r in run_log
+                          for tc in r.get("tool_calls", [])), 2)
+
+    # 工具调用分布统计
+    tool_counter = {}
+    for r in run_log:
+        for tc in r.get("tool_calls", []):
+            tool_counter[tc["name"]] = tool_counter.get(tc["name"], 0) + 1
+
+    # 完整消息历史（超长内容截断首尾保留），便于人工核对 agent 看到的上下文
+    truncated_messages = []
+    for m in (agent.messages or []):
+        content = m.get("content")
+        if isinstance(content, str) and len(content) > 4000:
+            content = content[:3000] + "\n...[截断]...\n" + content[-500:]
+        truncated_messages.append({
+            "role": m.get("role"),
+            "content": content,
+            "tool_calls": m.get("tool_calls"),
+            "tool_call_id": m.get("tool_call_id"),
+            "name": m.get("name"),
+        })
+
+    log = {
+        "unique_code": unique_code,
+        "status": status,
+        "difficulty": diff,
+        "flag_count": flag_count,
+        "container_addrs": container_addrs,
+        "task_given": task,
+        "found_flags": found_flags,
+        "submit_results": submit_results,
+        "summary": {
+            "elapsed_sec": round(time.time() - start_ts, 1),
+            "llm_calls": llm_calls,
+            "agent_iterations": result.get("iterations", 0),
+            "tool_calls_total": tool_calls_total,
+            "prompt_tokens": total_prompt,
+            "completion_tokens": total_completion,
+            "total_tokens": total_prompt + total_completion,
+            "llm_time_sec": llm_time,
+            "tool_time_sec": tool_time,
+            "tool_breakdown": tool_counter,
+        },
+        "rounds": run_log,
+        "messages": truncated_messages,
+    }
+
+    path = os.path.join(TB_LOG_DIR, f"{_safe_name(unique_code)}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  ⚠️ 日志导出失败: {e}")
+        return ""
+
+    # 追加到清单（多题并发 → 加锁，失败不影响主流程）
+    entry = {
+        "unique_code": unique_code,
+        "status": status,
+        "difficulty": diff,
+        "agent_iterations": result.get("iterations", 0),
+        "tool_calls_total": tool_calls_total,
+        "elapsed_sec": log["summary"]["elapsed_sec"],
+        "total_tokens": log["summary"]["total_tokens"],
+        "log_file": os.path.basename(path),
+    }
+    try:
+        with TB_PROGRESS_LOCK:
+            manifest = []
+            if os.path.exists(TB_LOG_MANIFEST):
+                with open(TB_LOG_MANIFEST, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if not isinstance(manifest, list):
+                    manifest = []
+            # 按题去重：重试/重跑同题时覆盖旧条目，只保留最终结果
+            manifest = [m for m in manifest if m.get("unique_code") != unique_code]
+            manifest.append(entry)
+            with open(TB_LOG_MANIFEST, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # 清单写入失败不影响主流程
+
+    print(f"  📄 日志已导出: {path}")
+    return path
+
+
+def export_run_summary(progress: Dict, start_time: float) -> str:
+    """整个 run 结束时生成总览文件（每题耗时/token/轮次/结论汇总）。"""
+    elapsed_total = round(time.time() - start_time, 1)
+    history = progress.get("history", [])
+    solved = [h["unique_code"] for h in history if h.get("status") == "solved"]
+    failed = [h["unique_code"] for h in history if h.get("status") == "failed"]
+
+    # 从单题日志回读 token/耗时统计
+    rows = []
+    for h in history:
+        code = h.get("unique_code", "")
+        row = {
+            "unique_code": code,
+            "status": h.get("status"),
+            "difficulty": h.get("difficulty", "?"),
+            "agent_iterations": h.get("agent_iterations", 0),
+            "flags_found": h.get("flags_found", 0),
+            "flags_submitted": h.get("flags_submitted", 0),
+            "timestamp": h.get("timestamp", ""),
+        }
+        log_path = os.path.join(TB_LOG_DIR, f"{_safe_name(code)}.json")
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    s = json.load(f).get("summary", {})
+                row.update({
+                    "elapsed_sec": s.get("elapsed_sec"),
+                    "llm_calls": s.get("llm_calls"),
+                    "tool_calls_total": s.get("tool_calls_total"),
+                    "prompt_tokens": s.get("prompt_tokens"),
+                    "completion_tokens": s.get("completion_tokens"),
+                    "total_tokens": s.get("total_tokens"),
+                    "llm_time_sec": s.get("llm_time_sec"),
+                    "tool_time_sec": s.get("tool_time_sec"),
+                    "tool_breakdown": s.get("tool_breakdown"),
+                    "log_file": os.path.basename(log_path),
+                })
+            except Exception:
+                pass
+        rows.append(row)
+
+    total_tokens = sum(r.get("total_tokens") or 0 for r in rows)
+
+    summary = {
+        "run_id": TB_RUN_ID,
+        "total_elapsed_sec": elapsed_total,
+        "challenges_attempted": len(rows),
+        "solved_count": len(solved),
+        "failed_count": len(failed),
+        "solve_rate": f"{len(solved)/len(rows)*100:.1f}%" if rows else "0.0%",
+        "solved_codes": solved,
+        "failed_codes": failed,
+        "total_tokens_all_challenges": total_tokens,
+        "lessons_count": len(progress.get("lessons", [])),
+        "submitted_flags": progress.get("submitted_flags", {}),
+        "challenges": rows,
+    }
+
+    os.makedirs(TB_LOG_DIR, exist_ok=True)
+    out_path = os.path.join(TB_LOG_DIR, "RUN_SUMMARY.json")
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  ⚠️ 总览导出失败: {e}")
+        return ""
+
+    print(f"\n📊 运行总览已导出: {out_path}")
+    return out_path
 
 
 def _infer_category(unique_code: str, desc: str) -> str:
@@ -126,6 +301,7 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
     desc = challenge.get("description", "")
     diff = challenge.get("difficulty", "?")
     flag_count = challenge.get("flag_count", 1)
+    _challenge_start = time.time()
 
     print(f"\n{'='*60}")
     print(f"🎯 解题: {unique_code} (难度: {diff}, flags: {flag_count})")
@@ -143,8 +319,7 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
             logger.warning(f"⚠️ {unique_code} 已有活跃实例，跳过启动直接拉地址")
         else:
             logger.error(f"❌ 启动失败: {err_code} - {err_msg}")
-            progress["failed"].append(unique_code)
-            _tb_save(progress)
+            _update_progress(progress, lambda p: p["failed"].append(unique_code))
             return {"status": "start_failed", "code": unique_code, "error": err_msg}
 
     # 拉容器地址：start_result 直接拿，拿不到就轮询 list_challenges 等就绪
@@ -169,8 +344,7 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
 
     if not container_addrs:
         logger.error(f"❌ 无法获取 {unique_code} 的容器地址")
-        progress["failed"].append(unique_code)
-        _tb_save(progress)
+        _update_progress(progress, lambda p: p["failed"].append(unique_code))
         return {"status": "no_container", "code": unique_code}
 
     addr_str = ", ".join(container_addrs)
@@ -223,9 +397,20 @@ Flag 数量: {flag_count}
     # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
     # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
-        # D1 按难度给轮次（log4-1: hard 题 50 轮不够——23 题 50 轮截断、19 failed）
-        _iter_limit = {"easy": 30, "medium": 50, "hard": 80, "expert": 100}.get((diff or "").lower(), 50)
+        # 轮次上限统一用 MAX_ITERATIONS（500）：不按难度截断（easy 快题靠迹象提前停，难题跑满）
+        _iter_limit = config.MAX_ITERATIONS
         result = agent.run(task, max_iterations=_iter_limit)
+    except LLMQuotaExhausted as e:
+        # 配额/5小时计费窗口耗尽：重试无意义，整轮应终止。关闭容器、导出日志后上抛，
+        # 由 run_tsecbench 捕获并优雅收尾（而不是把每道题都跑成"失败"继续烧容器）。
+        logger.error(f"❌ LLM 配额已耗尽，终止本轮: {e}")
+        _safe_close(unique_code)
+        _update_progress(progress, lambda p: p["failed"].append(unique_code))
+        _export_challenge_log(unique_code, diff, flag_count, {
+            "success": False, "flag_found": False, "iterations": agent.iteration,
+            "final_message": f"[LLM 配额耗尽: {e}]", "run_log": agent._run_log,
+        }, agent, task, "quota_exhausted", [], [], container_addrs, _challenge_start)
+        raise
     except Exception as e:
         logger.error(f"❌ {unique_code} 解题异常: {e}")
         result = {
@@ -279,7 +464,6 @@ Flag 数量: {flag_count}
         m.get("content", "") for m in agent.messages if isinstance(m.get("content"), str)
     )
 
-    import re
     flag_patterns = [r"flag\{[^}]+\}", r"FLAG\{[^}]+\}", r"ctf\{[^}]+\}", r"CTF\{[^}]+\}"]
     found_flags = set()
     for pattern in flag_patterns:
@@ -307,11 +491,11 @@ Flag 数量: {flag_count}
             else:
                 print(f"  ❌ 错误: {flag} - {sr.get('message', '')}")
 
-    # 更新进度
+    # 更新进度（锁内写入，避免并发线程写坏）
     if submitted_flags:
-        progress["submitted_flags"][unique_code] = submitted_flags
+        _update_progress(progress, lambda p: p["submitted_flags"].__setitem__(unique_code, list(submitted_flags)))
 
-    # 检查是否通关
+    # 检查是否通关（API 查询在锁外做，避免持锁期间阻塞）
     challenges = tsec_api.list_challenges()
     is_completed = False
     correct_count = 0
@@ -321,19 +505,18 @@ Flag 数量: {flag_count}
             correct_count = ch.get("correct_flag_count", 0)
             break
 
+    # 按通关状态一次性写回进度（缩短持锁时间）
     if is_completed:
-        progress["solved"].append(unique_code)
-        if unique_code in progress["in_progress"]:
-            progress["in_progress"].remove(unique_code)
-        print(f"\n🎉 {unique_code} 通关！(已提交 {correct_count} 个 flag)")
         status = "solved"
+        _update_progress(progress, lambda p: (p["solved"].append(unique_code),
+                                              p["in_progress"].remove(unique_code) if unique_code in p["in_progress"] else None))
+        print(f"\n🎉 {unique_code} 通关！(已提交 {correct_count} 个 flag)")
     elif agent_success or submitted_flags:
         status = "partial"
-        if unique_code not in progress["in_progress"]:
-            progress["in_progress"].append(unique_code)
+        _update_progress(progress, lambda p: p["in_progress"].append(unique_code) if unique_code not in p["in_progress"] else None)
     else:
         status = "failed"
-        progress["failed"].append(unique_code)
+        _update_progress(progress, lambda p: p["failed"].append(unique_code))
 
     # P2-⑤ 进度回收（MoMo-agent 借鉴）：agent 失败/超时时把 partial 发现存进经验库（不白跑）
     if final_msg and len(final_msg.strip()) > 10 and status in ("failed", "partial"):
@@ -356,17 +539,20 @@ Flag 数量: {flag_count}
     else:
         print(f"  ⚠️ 关闭失败: {close_result}")
 
-    # 记录历史
-    progress["history"].append({
+    # 记录历史（锁内写入，与并发线程的进度写互斥）
+    _update_progress(progress, lambda p: p["history"].append({
         "unique_code": unique_code,
         "status": status,
+        "difficulty": diff,
         "flags_found": len(found_flags),
         "flags_submitted": len(submitted_flags),
         "agent_iterations": result.get("iterations", 0),
         "timestamp": time.strftime("%H:%M:%S"),
-    })
+    }))
 
-    _tb_save(progress)
+    # ── 导出单题运行日志 ──
+    _export_challenge_log(unique_code, diff, flag_count, result, agent, task, status,
+                          found_flags, submit_results, container_addrs, _challenge_start)
 
     print(f"\n[5/5] 完成: {status}")
 
@@ -424,6 +610,23 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
     MAX_INFLIGHT = 2
     inflight = {}
     idx = 0
+    quota_exhausted = False  # LLM 配额耗尽 → 不再开新题/重试，等在途题收尾后直接汇总
+
+    def _collect(f, ch):
+        """收取一个完成 future 的结果；LLM 配额耗尽返回 True（终止整轮信号）"""
+        try:
+            result = f.result()
+            stats[result["status"]] = stats.get(result["status"], 0) + 1
+        except LLMQuotaExhausted:
+            print(f"\n❌ LLM 配额已耗尽，终止本轮（{ch.get('unique_code')} 收尾完成）")
+            stats["failed"] = stats.get("failed", 0) + 1
+            return True
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            logger.error(f"❌ 题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
+            stats["failed"] = stats.get("failed", 0) + 1
+        return False
 
     def _fill_slots(ex, inflight, idx):
         """预启动 + 填槽提交，保持 MAX_INFLIGHT 题在途（一题完成补下一题）"""
@@ -431,11 +634,6 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
             left = time_left()
             if left < safety_margin:
                 print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min < {safety_margin/60:.0f}min 兜底)，停止开新题")
-                try:
-                    for code in progress.get("in_progress", [])[:5]:
-                        tsec_api.close_challenge(code)
-                except Exception:
-                    pass
                 return idx
             ch = challenges[idx]
             print(f"\n{'#'*60}")
@@ -446,66 +644,70 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
             idx += 1
         return idx
 
-    with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as ex:
-        idx = _fill_slots(ex, inflight, idx)
-        while inflight:
-            done, _ = wait(list(inflight.keys()), return_when=FIRST_COMPLETED)
-            for f in done:
-                ch = inflight.pop(f)
-                try:
-                    result = f.result()
-                    stats[result["status"]] = stats.get(result["status"], 0) + 1
-                except KeyboardInterrupt:
-                    print("\n\n⚠️ 用户中断，保存进度...")
-                    _tb_save(progress)
-                    return
-                except Exception as e:
-                    logger.error(f"❌ 题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
-                    stats["failed"] = stats.get("failed", 0) + 1
+    try:
+        with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as ex:
             idx = _fill_slots(ex, inflight, idx)
+            while inflight and not quota_exhausted:
+                done, _ = wait(list(inflight.keys()), return_when=FIRST_COMPLETED)
+                for f in done:
+                    ch = inflight.pop(f)
+                    if _collect(f, ch):
+                        quota_exhausted = True
+                if not quota_exhausted:
+                    idx = _fill_slots(ex, inflight, idx)
+                # 配额耗尽时不再补槽：剩余在途题的 agent 会在下次 LLM 调用时同样抛出
+                # LLMQuotaExhausted 并自行关闭容器/导出日志，循环继续排空即可
 
-    # P2-④ 两轮制重试（MoMo-agent 借鉴）：跑完一轮后，第二轮优先重试 failed 题
-    retry_list = [code for code in progress.get("failed", [])
-                  if not progress.get("submitted_flags", {}).get(code)]
-    if retry_list:
-        print(f"\n🔄 第二轮重试: {len(retry_list)} 道未解出题 ({', '.join(retry_list[:5])}...)")
-        stats["retry_round"] = True
-        retry_inflight = {}
-        retry_idx = 0
-        retry_failed = list(retry_list)
+            # P2-④ 两轮制重试（MoMo-agent 借鉴）：跑完一轮后，第二轮优先重试 failed 题
+            # 注意：必须在同一个 with 块内提交，否则 executor 已 shutdown，submit 直接报错
+            if not quota_exhausted:
+                retry_list = [code for code in progress.get("failed", [])
+                              if not progress.get("submitted_flags", {}).get(code)]
+                if retry_list:
+                    print(f"\n🔄 第二轮重试: {len(retry_list)} 道未解出题 ({', '.join(retry_list[:5])}...)")
+                    stats["retry_round"] = True
+                    retry_inflight = {}
+                    retry_idx = 0
+                    retry_failed = list(retry_list)
 
-        def _retry_fill():
-            nonlocal retry_idx
-            while retry_idx < len(retry_failed) and len(retry_inflight) < MAX_INFLIGHT:
-                if time.time() - start_time + safety_margin > timeout_sec:
-                    break
-                code = retry_failed[retry_idx]
-                challenge = next((c for c in challenges if c.get("unique_code") == code), None)
-                retry_idx += 1
-                if not challenge:
-                    continue
-                print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
-                f = ex.submit(solve_challenge, challenge, progress)
-                retry_inflight[f] = challenge
-            return retry_idx
+                    def _retry_fill():
+                        nonlocal retry_idx
+                        while retry_idx < len(retry_failed) and len(retry_inflight) < MAX_INFLIGHT:
+                            left = time_left()
+                            if left < safety_margin:
+                                print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min)，重试轮停止开新题")
+                                break
+                            code = retry_failed[retry_idx]
+                            challenge = next((c for c in challenges if c.get("unique_code") == code), None)
+                            retry_idx += 1
+                            if not challenge:
+                                continue
+                            print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
+                            f = ex.submit(solve_challenge, challenge, progress)
+                            retry_inflight[f] = challenge
+                        return retry_idx
 
-        retry_idx = _retry_fill()
-        while retry_inflight:
-            done, _ = wait(list(retry_inflight.keys()), return_when=FIRST_COMPLETED)
-            for f in done:
-                ch = retry_inflight.pop(f)
-                try:
-                    result = f.result()
-                    stats[result["status"]] = stats.get(result["status"], 0) + 1
-                except Exception as e:
-                    logger.error(f"❌ 重试题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
-                    stats["failed"] = stats.get("failed", 0) + 1
-            retry_idx = _retry_fill()
-    else:
-        print("\n✅ 所有题目已解决，无需重试。")
+                    retry_idx = _retry_fill()
+                    while retry_inflight and not quota_exhausted:
+                        done, _ = wait(list(retry_inflight.keys()), return_when=FIRST_COMPLETED)
+                        for f in done:
+                            ch = retry_inflight.pop(f)
+                            if _collect(f, ch):
+                                quota_exhausted = True
+                        if not quota_exhausted:
+                            retry_idx = _retry_fill()
+                else:
+                    print("\n✅ 所有题目已解决，无需重试。")
+    except KeyboardInterrupt:
+        # with 块退出时 shutdown(wait=True) 会等在途题自行收尾（关容器/导出日志），随后继续汇总
+        print("\n\n⚠️ 用户中断，等待在途题收尾...")
 
     # 5. 汇总
     elapsed = time.time() - start_time
+
+    # 导出运行总览（每题耗时/token/轮次/结论）
+    summary_path = export_run_summary(progress, start_time)
+
     print(f"\n{'='*60}")
     print(f"📊 TSecBench 解题汇总")
     print(f"{'='*60}")
@@ -515,26 +717,17 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
     print(f"  ❌ 失败:  {stats.get('failed', 0)}")
     print(f"  ⏭️ 跳过:  {stats.get('skipped', 0)}")
     print(f"  ⏱️ 耗时:  {elapsed/60:.1f}min")
-    print(f"  进度文件: {os.path.join(config.OUTPUT_DIR, 'tsecbench_progress.json')}")
+    if summary_path:
+        print(f"  📊 运行总览: {summary_path}")
+    print(f"  📁 单题日志: {TB_LOG_DIR}/")
     print(f"{'='*60}\n")
 
 
 def show_status():
-    """显示当前解题进度"""
-    # 不加载历史进度（用户要求：每次运行从空开始）
-    progress = {"solved": [], "failed": [], "in_progress": [], "submitted_flags": {}, "history": []}
-    print(f"\n📊 TSecBench 解题进度:")
-    print(f"  ✅ 已通关: {len(progress['solved'])} 题")
-    print(f"  ⚠️ 进行中: {len(progress['in_progress'])} 题")
-    print(f"  ❌ 已失败: {len(progress['failed'])} 题")
-    print(f"  📝 已提交 flags: {sum(len(v) for v in progress['submitted_flags'].values())}")
+    """显示当前解题进度
 
-    if progress["solved"]:
-        print(f"\n通关题目:")
-        for code in progress["solved"]:
-            print(f"  ✅ {code}")
-
-    if progress["history"]:
-        print(f"\n最近 5 次操作:")
-        for h in progress["history"][-5:]:
-            print(f"  {h.get('timestamp', '?')} {h.get('unique_code', '?')} → {h.get('status', '?')}")
+    进度仅在运行进程内存中维护（不落盘），进程退出即清零。
+    历史结果请查看 output/logs_<run>/RUN_SUMMARY.json。
+    """
+    print("\n📊 TSecBench 解题进度: 进度不落盘，仅运行进程内有效（进程退出即清零）。")
+    print("   历史运行结果请查看 output/logs_<run>/RUN_SUMMARY.json 与 manifest.json。")

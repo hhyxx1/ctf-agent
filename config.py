@@ -65,6 +65,12 @@ def _apply_gateway(url: str) -> str:
     if not gateway_on:
         return url
 
+    # 已是平台网关 URL（slab llm-gateway.dasctf.com / 其他 /llm-gateway/proxy/）——
+    # 透明代理原样使用，绝不套 .tsecbench.gw 后缀
+    # （否则 llm-gateway.dasctf.com → llm-gateway.dasctf.com.tsecbench.gw，DNS 解析失败）
+    if "/llm-gateway/proxy/" in url or "llm-gateway." in url:
+        return url
+
     # https → http
     if url.startswith("https://"):
         url = "http://" + url[len("https://"):]
@@ -119,7 +125,7 @@ class Config:
     SLAB_ACCESS_KEY: str = os.getenv("SLAB_ACCESS_KEY", "")  # Agent 专用 AccessKey
 
     # ── Agent 行为 ──
-    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "50"))
+    MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "500"))
     # 并行方向 Agent 的轮次上限（多方向并行时每个方向各跑这么多轮；难题需要更多轮）
     PARALLEL_ROUNDS: int = int(os.getenv("PARALLEL_ROUNDS", "100"))
     # 单 Agent 动态评估窗口：先跑这么多轮，无解出迹象则动态切多方向并行（替代固定 30 轮）
@@ -128,6 +134,10 @@ class Config:
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     TOOL_TIMEOUT: int = int(os.getenv("TOOL_TIMEOUT", "240"))
+    # LLM 调用最大重试次数（模型临时不可用/超时/限流时自动重试，可配成较大值多试几次）
+    LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
+    # LLM 重试退避基数（秒），实际等待 = base * 2^attempt + 随机抖动；429 优先用服务端 Retry-After
+    LLM_BACKOFF_BASE_SEC: float = float(os.getenv("LLM_BACKOFF_BASE_SEC", "2.0"))
 
     # ── 运行控制 ──
     # 自启: 镜像启动后是否立即开始解题（托管模式必须为 true）

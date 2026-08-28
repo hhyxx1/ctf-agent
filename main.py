@@ -162,6 +162,12 @@ AI Agent 平台 (slab-match / pro.dasctf.com):
     elif cmd == "slab":
         from slab_match_solver import run_slab
         run_slab()
+    elif cmd == "slab-one":
+        if len(sys.argv) < 3:
+            print("错误: 请提供题目 ID，如: python main.py slab-one 10792")
+            return
+        from slab_match_solver import run_slab
+        run_slab(only_id=int(sys.argv[2]))
     elif cmd == "slab-list":
         from slab_match_solver import list_challenges
         from utils.slab_match_api import SlabMatchAPI

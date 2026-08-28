@@ -21,6 +21,17 @@ from tools.evasion_tool import (
     shellcode_encode, msfvenom_payload,
     evade_check, tunnel_setup,
 )
+from tools.recon_tool import (
+    full_recon, check_conn, wordlist, searchsploit_query, env_selfcheck,
+)
+from tools.pwn_kit_tool import (
+    pwn_triage, libc_identify, one_gadget, gdb_debug, pwn_local_setup,
+)
+from tools.forensics_triage_tool import (
+    pcap_triage, memory_triage, audio_steg, qr_decode, pdf_office_analyze,
+)
+from tools.auth_tool import hash_crack, jwt_tool, flask_unsign
+from tools.crypto_ext_tool import classical_cipher, lattice_lll, php_filter_chain
 
 __all__ = [
     "TOOL_REGISTRY",
@@ -47,4 +58,14 @@ __all__ = [
     # Evasion
     "shellcode_encode", "msfvenom_payload",
     "evade_check", "tunnel_setup",
+    # Recon / 基建
+    "full_recon", "check_conn", "wordlist", "searchsploit_query", "env_selfcheck",
+    # Pwn 增强
+    "pwn_triage", "libc_identify", "one_gadget", "gdb_debug", "pwn_local_setup",
+    # 取证分诊
+    "pcap_triage", "memory_triage", "audio_steg", "qr_decode", "pdf_office_analyze",
+    # 认证类
+    "hash_crack", "jwt_tool", "flask_unsign",
+    # Crypto 扩展
+    "classical_cipher", "lattice_lll", "php_filter_chain",
 ]

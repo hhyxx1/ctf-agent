@@ -20,6 +20,7 @@
   api.recover_env(1001)         # 回收环境
 """
 import os
+import time
 import logging
 import requests
 
@@ -50,16 +51,47 @@ class SlabMatchAPI:
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         url = f"{self.host}{API_PREFIX}{path}"
-        try:
-            resp = self.session.request(method, url, timeout=30, **kwargs)
-            resp.raise_for_status()
-            body = resp.json()
-        except Exception as e:
-            logger.error(f"SlabMatch API 请求失败 {method} {path}: {e}")
-            raise
-        if body.get("code") != "00000":
-            raise RuntimeError(f"平台返回错误 code={body.get('code')} msg={body.get('message')}")
-        return body.get("data") or {}
+        # 429 限流退避重试：平台并发限制严格，连续请求会 429，指数退避后重试
+        max_attempts = 4
+        for attempt in range(max_attempts):
+            try:
+                resp = self.session.request(method, url, timeout=30, **kwargs)
+                if resp.status_code == 429:
+                    if attempt < max_attempts - 1:
+                        wait = 5 * (2 ** attempt)
+                        logger.warning(f"⚠️ 429 限流 {method} {path}，{wait}s 后重试 (attempt {attempt+1}/{max_attempts})")
+                        time.sleep(wait)
+                        continue
+                    raise RuntimeError(f"429 限流重试 {max_attempts} 次仍失败")
+                resp.raise_for_status()
+                body = resp.json()
+                if body.get("code") != "00000":
+                    raise RuntimeError(f"平台返回错误 code={body.get('code')} msg={body.get('message')}")
+                return body.get("data") or {}
+            except RuntimeError:
+                raise
+            except requests.exceptions.ConnectionError as e:
+                # 连接被重置/中断（ConnectionResetError 104 等）：Session 复用的 keep-alive
+                # 连接可能被服务端/负载均衡重置——关闭连接池强制建新连接再重试
+                try:
+                    self.session.close()  # 只关连接池，headers 保留，下次 request 自动建新连接
+                except Exception:
+                    pass
+                if attempt < max_attempts - 1:
+                    wait = 3 * (2 ** attempt)
+                    logger.warning(f"⚠️ 连接重置 {method} {path}: {e}，重建连接 {wait}s 后重试 (attempt {attempt+1}/{max_attempts})")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"SlabMatch API 请求失败 {method} {path}: {e}")
+                raise
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    wait = 3 * (2 ** attempt)
+                    logger.warning(f"⚠️ 请求失败 {method} {path}: {e}，{wait}s 后重试 (attempt {attempt+1}/{max_attempts})")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"SlabMatch API 请求失败 {method} {path}: {e}")
+                raise
 
     # ── 竞赛信息 ──
     def get_match_info(self) -> dict:

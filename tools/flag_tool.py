@@ -75,11 +75,13 @@ def submit_flag(flag: str, challenge_id: str = "") -> str:
     logger.info(f"提交 flag: {flag}, challenge_id: {challenge_id}")
 
     # P1-① 证据驱动防误报：submit_flag 前校验 flag 格式
-    # flag 必须匹配合法格式（flag{...} 且内容长度合理），防 LLM 幻觉编造垃圾 flag
+    # 接受常见 CTF flag 前缀（flag/ctf/HTB 等迁移题）+ {} 包裹 + 内容长度合理，
+    # 防 LLM 幻觉编造垃圾 flag（无 {} 包裹/乱码/超长的拒绝）
     _f = flag.strip()
-    if not re.match(r'^(flag|FLAG|ctf|CTF)\{[^\}]{4,}\}$', _f):
+    if not re.match(r'^[A-Za-z0-9_]{2,12}\{[^\}]{4,}\}$', _f):
         return f"[拒绝提交] flag 格式异常: {_f[:60]}...（疑似 LLM 幻觉编造，请通过漏洞利用复现确认真实 flag）"
-    if any(ord(c) < 32 or ord(c) > 126 for c in _f[5:-1]):
+    _inner = _f[_f.index('{') + 1:-1]
+    if any(ord(c) < 32 or ord(c) > 126 for c in _inner):
         return f"[拒绝提交] flag 内含非 ASCII 字符，疑似乱码：{_f[:60]}..."
 
     # 分派：tsecbench 平台（BENCHMARK_TOKEN 已配置）→ tsec_api 正式提交

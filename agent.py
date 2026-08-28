@@ -5,7 +5,7 @@ import re
 import threading
 from typing import List, Dict
 from config import config
-from llm import llm
+from llm import llm, LLMQuotaExhausted
 from tools import get_tools_schema, execute_tool
 from utils.knowledge_base import search_knowledge
 
@@ -117,6 +117,27 @@ SYSTEM_PROMPT = """你是一个专业的 CTF（夺旗赛）自动解题 Agent，
 - **extract_flag**: 从文本中提取 flag
 - **submit_flag**: 提交 flag 完成题目
 
+### 组合分诊工具（一次调用顶多次往返，优先用）
+- **check_conn**: 连通性预检。**首次访问靶场地址前先调它**，不可达立即报告止损，不要在超时上空烧
+- **full_recon**: 一键侦察。web 目标=whatweb+响应头+robots+目录扫描+敏感路径；主机目标=nmap -sV。第一步侦察就调它
+- **pwn_triage**: 二进制一键分诊：保护机制(checksec)+关键字符串+libc 版本+gadget+利用建议。pwn 题拿到附件第一件事调它
+- **libc_identify**: 泄露地址 → libc 版本 + system//bin/sh 偏移。ret2libc 必用
+- **one_gadget**: libc 一键找单发 getshell gadget（注意满足约束）
+- **gdb_debug**: gdb 批处理调试（断点/寄存器/内存/崩溃回溯）。exploit 打不通时用它看真相，不要盲猜
+- **pwn_local_setup**: 本地复现环境（patchelf 换 libc）。**先本地打通再打远程**
+- **pcap_triage**: 流量包一键分诊（协议分布+HTTP/DNS+对象导出）。取证流量题先调它
+- **memory_triage**: 内存镜像一键分诊（volatility3 管道或 strings 降级）
+- **audio_steg / qr_decode / pdf_office_analyze**: 音频隐写 / 二维码 / PDF-Office 文档取证
+- **hash_crack**: 哈希识别+自动破解（john/hashcat + rockyou 自动解压）
+- **jwt_tool**: JWT 解码+弱密钥爆破+alg:none 变体构造
+- **flask_unsign**: Flask session 解码/弱密钥爆破/伪造 admin
+- **classical_cipher**: 古典密码自动求解（凯撒/维吉尼亚/单表替换/栅栏/Atbash，卡方打分）
+- **lattice_lll**: LLL 格基规约（格密码/HNP/背包，自己构造好格再传）
+- **php_filter_chain**: 生成 php://filter RCE 利用链（LFI 无写权限直接 RCE，生成后填进 include 参数）
+- **wordlist**: 拿字典绝对路径（爆破/扫描前先调，不要猜路径）
+- **searchsploit_query**: 本地 Exploit-DB 检索（nmap 出版本号后查现成 exploit）
+- **env_selfcheck**: 环境自检（工具/字典/Python 库缺失会列出来，缺什么就避开依赖它的路线）
+
 ## 解题流程
 1. **识别题型**: crypto / web / pwn / reverse / forensics / misc
 2. **选择工具**: 根据题型选专用工具，通用需求用 run_shell/run_python
@@ -141,20 +162,21 @@ SYSTEM_PROMPT = """你是一个专业的 CTF（夺旗赛）自动解题 Agent，
 - **dir_scan**: 目录/文件扫描（gobuster）
 - **web_fingerprint**: Web 指纹识别（whatweb）
 - **vuln_scan**: 综合漏洞扫描（nikto）
-- 流程: web_fingerprint → dir_scan → http_request 测试注入点 → sqli_scan
+- 流程: full_recon(一键侦察) → 按结果用 http_request 测试注入点 → sqli_scan / dir_scan 深挖
 
 ### 2. 二进制漏洞挖掘
+- **pwn_triage**: 一键分诊（保护机制+libc 版本+gadget+建议）替代手动 file/checksec/strings
 - **binary_analyze**: 综合分析（file/checksec/strings/readelf/objdump）
 - **ghidra_decompile**: Ghidra headless 反编译为 C 伪代码
 - **vuln_pattern_scan**: 危险函数和漏洞模式自动扫描
-- 流程: binary_analyze → vuln_pattern_scan → ghidra_decompile (针对性反编译可疑函数)
+- 流程: pwn_triage → vuln_pattern_scan → ghidra_decompile (针对性反编译可疑函数)
 
 ### 3. 漏洞利用
 - **rop_gadget_search**: 搜索 ROP gadget（ROPgadget）
 - **exploit_template**: 生成 pwntools exploit 骨架（buffer_overflow/format_string/ret2libc/ret2shellcode）
 - **run_python + pwntools**: 编写和运行 exploit
 - **msfvenom_payload**: 生成反弹 shell payload
-- 流程: binary_analyze → rop_gadget_search → exploit_template → 调试 → 远程利用
+- **流程（铁律）**: pwn_triage → pwn_local_setup(有 libc 就换) → **本地打通** → 远程利用 → 失败用 gdb_debug 看回溯
 
 ### 4. 多阶段渗透
 - **nmap_scan**: 网络端口和服务扫描（quick/full/vuln/stealth/udp）
@@ -188,13 +210,14 @@ SYSTEM_PROMPT = """你是一个专业的 CTF（夺旗赛）自动解题 Agent，
 ### Crypto (其他)
 - AES/DES: 用 run_python + pycryptodome
 - 编码题: 先用 auto_decode，失败再手动分析
-- 古典密码: run_python 写解密脚本
+- 古典密码: 用 classical_cipher（凯撒/维吉尼亚/单表/栅栏自动打分），失败再 run_python
 
 ### Forensics / Misc
 - **拿到文件第一步用 analyze_file**
 - 图片题用 steg_check 检测隐写
-- 流量题用 run_shell 执行 tshark / wireshark
-- 内存题用 run_shell 执行 volatility
+- 流量题用 **pcap_triage**（一键协议分布/HTTP 对象导出），深挖再 run_shell tshark 逐流
+- 内存题用 **memory_triage**（volatility3 管道）
+- 音频/二维码/Office 宏: audio_steg / qr_decode / pdf_office_analyze
 - 编码题用 auto_decode
 
 ## 重要规则
@@ -296,6 +319,7 @@ class Agent:
         self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
         self._no_flag_rounds = 0  # 连续无 extract_flag/submit_flag 动作的轮数（B1 失败收敛检测）
         self._flag_hint_done = False  # 聚焦提 flag 提示只发一次
+        self._run_log: List[Dict] = []  # per-round 详细日志（用于导出，不进入 LLM 上下文）
 
     def _compress_history(self, threshold: int = 40, keep_tail: int = 10, max_len: int = 400):
         """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果截断为摘要。
@@ -314,11 +338,33 @@ class Agent:
 
     def _call_llm(self) -> str:
         """调用 LLM，处理 tool_calls"""
+        import time as _time
+        _t0 = _time.time()
         response = llm.chat(self.messages, tools=self.tools)
+        _llm_elapsed = round(_time.time() - _t0, 2)
         choice = response.choices[0]
         msg = choice.message
         # 记录本轮是否调用了工具（空转判定用——不能看 messages[-1]，调工具后末尾是 tool 结果消息）
         self._last_has_tool_calls = bool(msg.tool_calls)
+        # ── 日志记录 ──
+        _usage = getattr(response, "usage", None)
+        _usage_dict = {}
+        if _usage:
+            _usage_dict = {
+                "prompt_tokens": getattr(_usage, "prompt_tokens", None),
+                "completion_tokens": getattr(_usage, "completion_tokens", None),
+                "total_tokens": getattr(_usage, "total_tokens", None),
+            }
+        self._run_log.append({
+            "round": self.iteration,
+            "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S"),
+            "llm_elapsed_sec": _llm_elapsed,
+            "usage": _usage_dict,
+            "has_tool_calls": self._last_has_tool_calls,
+            "llm_reasoning": (getattr(msg, "reasoning_content", None) or "")[:2000],
+            "llm_output": (msg.content or "")[:3000],
+            "tool_calls": [],
+        })
 
         # 把 assistant 消息加入历史（包括 tool_calls）
         assistant_msg = {"role": "assistant", "content": msg.content or ""}
@@ -348,6 +394,7 @@ class Agent:
         results = []
         for tc in msg.tool_calls:
             name = tc.function.name
+            _t_tool0 = _time.time()
             try:
                 args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
@@ -357,11 +404,23 @@ class Agent:
             print(f"  🔧 {name}({json.dumps(args, ensure_ascii=False)[:200]})")
 
             result = execute_tool(name, args)
+            _tool_elapsed = round(_time.time() - _t_tool0, 2)
 
             # 截断过长的结果
             result_str = str(result)
+            _orig_len = len(result_str)
             if len(result_str) > 6000:
                 result_str = result_str[:3000] + "\n...[截断]...\n" + result_str[-2500:]
+
+            # ── 记录工具调用日志 ──
+            if self._run_log:
+                self._run_log[-1]["tool_calls"].append({
+                    "name": name,
+                    "arguments": args,
+                    "elapsed_sec": _tool_elapsed,
+                    "result_preview": result_str[:1500],
+                    "result_full_len": _orig_len,
+                })
 
             # 检测 flag 提交
             # 仅当 submit_flag 返回「提交成功」（真提交到平台）才视为完成；
@@ -399,16 +458,16 @@ class Agent:
                         "若返回本地模式/失败/错误，说明 flag 不对，继续解题验证真实 flag，不要停止。"
                     )
 
-            # B1 失败收敛检测：连续 15 轮无 extract_flag/submit_flag 动作 → 提示聚焦提 flag（防盲目 run_shell 空转）
+            # B1 失败收敛检测：连续 25 轮无 extract_flag/submit_flag 动作 → 提示聚焦提 flag（防盲目 run_shell 空转）
             if name in ("extract_flag", "submit_flag"):
                 self._no_flag_rounds = 0
             else:
                 self._no_flag_rounds += 1
-                if self._no_flag_rounds >= 15 and not self._flag_hint_done:
+                if self._no_flag_rounds >= 25 and not self._flag_hint_done:
                     self._flag_hint_done = True
                     logger.info(f"连续 {self._no_flag_rounds} 轮无 flag 动作，注入聚焦提示")
                     result_str = result_str + (
-                        "\n\n【聚焦提 flag】已连续 15 轮未调用提取/提交 flag 工具。请聚焦："
+                        "\n\n【聚焦提 flag】已连续 25 轮未调用提取/提交 flag 工具。请聚焦："
                         "从已探测信息中提取 flag（extract_flag），找到后立即 submit_flag 提交；"
                         "若当前方向无 flag，换攻击面（其他功能/接口/漏洞入口）。"
                     )
@@ -436,7 +495,7 @@ class Agent:
                 "flag_found": bool,    # 是否找到 flag
                 "iterations": int,     # 总共思考了多少轮
                 "final_message": str,  # Agent 最后说的话
-                "messages": list,      # 完整对话（多方向并行/经验提取用）
+                "run_log": list,       # per-round 详细日志（导出用）
             }
         """
         # 多方向并行时限制轮次（防止多个并行 agent 各跑满 MAX_ITERATIONS 烧 token）
@@ -495,6 +554,10 @@ class Agent:
 
             try:
                 result = self._call_llm()
+            except LLMQuotaExhausted:
+                # 配额/计费窗口耗尽：重试无意义，穿透给上层收尾（继续跑只是烧钱）
+                print("  ❌ LLM 配额已耗尽，终止本题")
+                raise
             except Exception as e:
                 logger.error(f"LLM 调用失败: {e}")
                 print(f"  ❌ LLM 调用失败: {e}")
@@ -530,10 +593,9 @@ class Agent:
             # 置事件通知其他并行方向提前停止（省 token）
             if stop_event is not None and not stop_event.is_set() and _detect_signal(self.messages):
                 stop_event.set()
-            # 任务树/阶段推进提示（PentestGPT 轻量版）：每 10 轮提醒推进阶段（定类→利用→提交），
-            # A2/D2 探测限轮+提示提前：每 5 轮提醒推进阶段（定类→利用→提交），带题型攻击面方向
-            # （log4-1: 进度提示 183 次但 10 轮太晚/太笼统，23 题仍 50 轮截断）
-            if self.iteration % 5 == 0 and self.iteration < iter_limit:
+            # 任务树/阶段推进提示：每 10 轮提醒推进阶段（定类→利用→提交），带题型攻击面方向
+            # （5 轮太频繁：agent 深入分析时反复被打断，20 轮内注 4 次——改回 10 轮）
+            if self.iteration % 10 == 0 and self.iteration < iter_limit:
                 _cat_tip = CATEGORY_TIPS.get((self.category or "").lower(), GENERIC_TIP)
                 phase_hint = (f"【进度推进】已进行 {self.iteration} 轮。请确认当前阶段（定类→利用→提交）："
                               f"若还在重复探测早期内容，应推进到利用/提交——{_cat_tip} "
@@ -546,6 +608,7 @@ class Agent:
             "flag_found": self.found_flag,
             "iterations": self.iteration,
             "final_message": self.messages[-1].get("content", "") if self.messages else "",
+            "run_log": self._run_log,
         }
 
         print(f"\n{'='*60}")
@@ -566,3 +629,4 @@ class Agent:
         self.iteration = 0
         self.found_flag = False
         self.submitted = False
+        self._run_log = []

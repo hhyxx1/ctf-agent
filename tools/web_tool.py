@@ -49,6 +49,11 @@ def http_request(url: str, method: str = "GET", headers: dict = None,
                  body: str = "", timeout: int = 30,
                  follow_redirects: bool = True) -> str:
     """发送 HTTP 请求"""
+    # 比赛外联限制：URL 引用外部站点（搜索引擎/社区等）→ 拒绝（规则：禁止与外部通信）
+    from tools.base import _check_external_access
+    block = _check_external_access(url)
+    if block:
+        return block
     # 结果缓存去重：GET 请求按 URL 去重，防止重复探测同一目标浪费轮次
     from tools.base import check_exec_cache, store_exec_cache
     if method.upper() == "GET":

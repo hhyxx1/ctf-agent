@@ -19,6 +19,11 @@ from tools.base import register_tool, run_cmd
 )
 def run_shell(command: str) -> str:
     """执行 shell 命令并返回输出（超时整组强杀，防 msfconsole/nc 挂死）"""
+    # 比赛外联限制：命令引用外部站点（搜索引擎/社区等）→ 拒绝（规则：禁止与外部通信）
+    from tools.base import _check_external_access
+    block = _check_external_access(command)
+    if block:
+        return block
     # 结果缓存去重：完全相同命令去重（日志实测同一探测命令反复执行 10+ 次）
     from tools.base import check_exec_cache, store_exec_cache
     cache_key = f"shell:{command[:300]}"

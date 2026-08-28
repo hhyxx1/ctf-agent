@@ -106,22 +106,53 @@ def list_challenges(api: SlabMatchAPI) -> List[Dict]:
 def _extract_endpoint_target(exercise: Dict) -> str:
     """从题目详情里提取 Agent 可访问的目标地址
 
-    优先 proxyIps:portMappings[].proxy（平台代理），否则 exposeIps:ports[0]。
+    优先 proxyIps:portMappings[].proxy（平台代理，本机可访问），否则 exposeIps:ports[0]。
+    ports 元素可能是纯数字（"80"）或协议前缀（"http/80"、"tcp/22"）——统一提取纯端口。
     """
+    import re as _re
     eps = exercise.get("endpoints") or []
     if not eps:
         return ""
     ep = eps[0]
+
+    def _pure_port(p: str) -> str:
+        """从 '80' / 'http/80' / 'tcp:22' 提取纯端口数字"""
+        p = str(p).strip()
+        m = _re.search(r"(\d+)\s*$", p)
+        return m.group(1) if m else p
+
     proxy_ips = ep.get("proxyIps") or []
     mappings = ep.get("portMappings") or []
     if proxy_ips and mappings:
         m = mappings[0]
-        return f"{proxy_ips[0]}:{m.get('proxy', m.get('port', ''))}"
+        proxy_port = _pure_port(m.get("proxy", m.get("port", "")))
+        if proxy_port:
+            return f"{proxy_ips[0]}:{proxy_port}"
     expose = ep.get("exposeIps") or []
     ports = ep.get("ports") or []
     if expose and ports:
-        return f"{expose[0]}:{ports[0]}"
+        p = _pure_port(ports[0])
+        if p:
+            return f"{expose[0]}:{p}"
     return ""
+
+
+def _extract_endpoint_users(exercise: Dict) -> str:
+    """从 endpoints[].users 提取平台提供的默认账号密码（api_doc：可用账号密码）
+
+    返回形如 "username: root / password: password" 的提示文本，无则返回空串。
+    """
+    eps = exercise.get("endpoints") or []
+    if not eps:
+        return ""
+    users = eps[0].get("users") or []
+    parts = []
+    for u in users:
+        uname = u.get("username", "")
+        upass = u.get("password", "")
+        if uname or upass:
+            parts.append(f"{uname} / {upass}" if uname and upass else (uname or upass))
+    return "；".join(parts) if parts else ""
 
 
 def _wait_env_ready(api: SlabMatchAPI, exercise_id: int) -> Dict:
@@ -362,6 +393,16 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     desc = detail.get("description", "")
     diff = detail.get("difficulty", "?")
     score = detail.get("score", "")
+    # 比赛规则：0 分题为测试题/无效题，不用解题——直接跳过（不启环境、不解题、不沉淀经验）
+    try:
+        _score_val = float(score) if score not in ("", None) else 0.0
+    except (ValueError, TypeError):
+        _score_val = -1.0  # 分值无法解析时保守不跳过
+    if _score_val == 0:
+        print(f"  ⏭️ 0 分测试题，跳过解题（比赛规则：0 分题不用解）")
+        progress["skipped"].append(ex_id)
+        _save_progress(progress)
+        return {"status": "skipped_zero_score", "exercise_id": ex_id}
     has_solved = detail.get("hasSolved", False)
     if has_solved:
         _try_recover_env(api, ex_id)
@@ -406,6 +447,10 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 
     target = _extract_endpoint_target(detail)
     print(f"  目标地址: {target or '(无端点)'}")
+    # 平台提供的默认账号密码（api_doc: endpoints[].users 可用账号密码）——登录题直接可用，别爆破
+    users_hint = _extract_endpoint_users(detail)
+    if users_hint:
+        print(f"  🔑 平台账号: {users_hint}")
 
     # 附件信息：下载 attachment.files[].url 到本地工作目录，Agent 直接用 read_file/file 处理
     import os as _os, requests as _requests
@@ -413,7 +458,13 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     _os.makedirs(att_dir, exist_ok=True)
     att_files = []
     att = detail.get("attachment") or {}
-    for f in att.get("files") or []:
+    # 兼容两种附件结构：
+    #   1. attachment.files[]（api_doc 文档格式）
+    #   2. attachment 直接含 url/name（实际返回格式，如 MISC 题的 zip 附件）
+    att_items = att.get("files") or []
+    if not att_items and att.get("url"):
+        att_items = [{"name": att.get("name", "attachment"), "url": att.get("url", "")}]
+    for f in att_items:
         fname = f.get("name", "attachment")
         furl = f.get("url", "")
         fpath = _os.path.join(att_dir, fname)
@@ -453,6 +504,17 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
                 lessons_hint = "\n".join(parts) + "\n"
     except Exception:
         pass
+    # 当前未获取到靶场地址（可能环境还在准备/接口时序）→ 提示 agent 别在本机瞎逛
+    if not target:
+        no_target_hint = (
+            "\n⚠️ **当前未获取到靶场地址**（可能环境仍在准备中）。"
+            "若目标服务可通过题目名称/描述里的线索定位（如已知 IP/域名），可尝试探测；"
+            "否则先分析题目文本找线索（编码/密码/关键字），不要在本机文件系统乱翻"
+            "（.env / config.py / tasks.json / output/ 等均与本题无关）。"
+        )
+    else:
+        no_target_hint = ""
+
     task = f"""请解以下 CTF 题目并提交 flag。
 
 题目 ID: {ex_id}
@@ -461,9 +523,10 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
 难度: {diff}
 分值: {score}
 靶场地址: {target}
-
+{('平台账号密码（可用直接登录）: ' + users_hint + '\n') if users_hint else ''}
 附件:
 {chr(10).join(att_files) if att_files else '（无附件）'}
+{no_target_hint}
 
 ## 解题思路提示（按题目类型，方法论）
 {strategy if strategy else '（通用: 先探测入口, 再定向利用）'}
@@ -480,19 +543,27 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     # 单 Agent 主流程（开局并行已移除）：先跑 INITIAL_ROUNDS 轮评估，
     # 无解出迹象 → 动态切多方向并行（兜底，不等完整失败）
     parallel_flags = []
-    print(f"\n[3/5] Agent 解题（初始评估 {config.INITIAL_ROUNDS} 轮）...")
+    # 轮次上限统一用 MAX_ITERATIONS（500）：不按难度截断（easy 快题靠迹象提前停，难题跑满）
+    max_rounds = config.MAX_ITERATIONS
+    print(f"\n[3/5] Agent 解题（初始评估 {config.INITIAL_ROUNDS} 轮，轮次上限 {max_rounds}）...")
     agent = build_agent(cat)  # 规则分派子 Agent（按题型专用 prompt + 工具子集，独立上下文）
     result = agent.run(task, verbose=True, max_iterations=config.INITIAL_ROUNDS)
     no_signal = not _detect_signal(agent.messages)
-    if not result.get("success") and not result.get("flag_found") and no_signal:
+    # 只要 10 轮没解出就继续（有迹象=快解出，更该给足轮次，不能截断）
+    if not result.get("success") and not result.get("flag_found"):
         dirs = DIRECTIONS.get((cat or "").lower(), [])
-        if dirs:
+        if dirs and no_signal:
             print(f"\n  🔀 单 Agent {config.INITIAL_ROUNDS} 轮无解出迹象，动态切多方向并行（{len(dirs)} 方向）...")
-            parallel_flags, pres = _parallel_solve(task, cat)
+            parallel_flags, pres = _parallel_solve(task, cat, max_rounds=config.MAX_ITERATIONS)
             if parallel_flags:
                 print(f"  🔀 并行方向找到 flag: {sorted(parallel_flags)}")
             else:
                 print(f"  🔀 并行未找到 flag（方向结果: {[v.get('success') or v.get('error', '') for v in pres.values()]}）")
+        else:
+            # 有迹象（快解出）或无方向可切：按难度轮次继续补跑，不因 10 轮评估就放弃
+            # （教训：no_signal 时截断导致大量"快解出"的题 10 轮 failed）
+            print(f"\n  🔀 单 Agent {config.INITIAL_ROUNDS} 轮未解出，按轮次上限继续补跑（{config.MAX_ITERATIONS} 轮）...")
+            result = agent.run(task, verbose=True, max_iterations=config.MAX_ITERATIONS)
     agent_success = result.get("success", False)
     final_msg = result.get("final_message", "")
 
@@ -559,8 +630,12 @@ def solve_challenge(api: SlabMatchAPI, ch: Dict, progress: Dict, ready: dict = N
     wrong_streak = 0  # 连续错误提交计数（熔断：连错 3 次停提该题，防烧提交次数，借鉴 loot_gate SUBMIT_MAX_WRONG）
     seen = set()  # 本回合内已提交过的值（防同一 flag 重复提交）
     for flag in found_flags:
-        # 剥离 DASCTF{}/flag{} 包裹得到纯内容（平台答案库存纯数字，实测确认）
-        inner = re.sub(r"^(?:DASCTF|dasctf|flag|FLAG|ctf|CTF)\{|\}$", "", flag)
+        # 比赛规则：每题 flag 最大提交 50 次，超过无法提交——提前停止，防烧次数/防违规
+        if len(submitted) + len(failed_flags) >= 50:
+            print(f"  ⏹️ 该题 flag 提交次数已达上限 50，停止提交（比赛规则）")
+            break
+        # 剥离 DASCTF{}/flag{}/HTB{} 包裹得到纯内容（平台答案库存纯内容；HTB 迁移题也剥）
+        inner = re.sub(r"^(?:DASCTF|dasctf|flag|FLAG|ctf|CTF|HTB|htb)\{|\}$", "", flag)
         cand = inner or flag  # 同一 flag 只提交剥离后的纯内容一次（不再试完整格式，省提交次数）
         if cand in submitted or cand in failed_flags or cand in seen:
             if cand in failed_flags:
@@ -729,8 +804,8 @@ def _prebuild_env(ex_id: int, ready: dict):
         ready[ex_id] = "denied"  # 异常也视为不可预构建
 
 
-def run_slab(timeout_sec: int = 0, start_time: float = 0):
-    """运行完整解题循环"""
+def run_slab(timeout_sec: int = 0, start_time: float = 0, only_id: int = 0):
+    """运行完整解题循环（only_id 指定时只跑该题）"""
     if start_time == 0:
         start_time = time.time()
 
@@ -745,6 +820,12 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
 
     api = SlabMatchAPI()
     challenges = list_challenges(api)
+    if only_id:
+        challenges = [c for c in challenges if c["exercise_id"] == int(only_id)]
+        if not challenges:
+            print(f"⚠️ 未找到题目 id={only_id}（可能未开放/不存在/已跳过）")
+            return
+        print(f"🎯 指定单题模式: 只跑 id={only_id} ({challenges[0].get('name')})")
     if not challenges:
         print("无题目")
         return
@@ -756,14 +837,14 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
     stats = {"solved": 0, "partial": 0, "failed": 0, "skipped": 0}
     ready = {}  # 记录后台已预启动就绪的题
     prebuild_denied = False  # 平台拒绝预构建时禁用后续预启动
-    # 持续填槽两题并行（借鉴 pi-recon 填槽调度）：同时最多 2 题在途，
-    # 一题完成立即补下一题——卡题不阻塞，总吞吐提升
-    MAX_INFLIGHT = 2
+    # 单题串行（比赛规则：靶机同队上限 3 台；多 agent 并行+预启动同时占多台会撞 40409 上限）
+    # ——一次只 1 题在途，配合每题完成后及时销毁，不超 3 台上限
+    MAX_INFLIGHT = 1
     inflight = {}  # future -> challenge
     idx = 0
 
     def _fill_slots(ex, inflight, idx, prebuild_denied):
-        """预启动下一题 + 填槽提交，保持 MAX_INFLIGHT 题在途"""
+        """填槽提交，保持 MAX_INFLIGHT 题在途（单题串行：一次 1 题）"""
         while idx < len(challenges) and len(inflight) < MAX_INFLIGHT:
             left = time_left()
             if left < 60:
@@ -771,17 +852,7 @@ def run_slab(timeout_sec: int = 0, start_time: float = 0):
                 return idx, prebuild_denied
             ch = challenges[idx]
             print(f"\n  题目 {idx+1}/{len(challenges)} (剩 {left/60:.1f}min)")
-            # P2a：后台预启动下一题环境（省环境等待；并行 build 冲突由 denied/429 兜底）
-            if idx + 1 < len(challenges) and not prebuild_denied:
-                nxt = challenges[idx + 1]["exercise_id"]
-                if nxt not in progress["solved"] and nxt not in ready:
-                    t = threading.Thread(target=_prebuild_env, args=(nxt, ready), daemon=True)
-                    t.start()
-                    print(f"   ⟳ 后台预启动下一题环境 (id={nxt})")
-            # 兜底：平台拒绝预构建（denied）→ 禁用后续预启动（恢复解题时才 build）
-            if any(v == "denied" for v in ready.values()):
-                prebuild_denied = True
-                print("   ⛔ 平台拒绝预构建环境，已禁用预启动（恢复解题时才 build）")
+            # 后台预启动已禁用（会额外占靶机名额，撞 3 台上限）——解题时才 build
             f = ex.submit(solve_challenge, api, ch, progress, ready)
             inflight[f] = ch
             idx += 1
