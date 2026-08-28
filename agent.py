@@ -3,10 +3,12 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import List, Dict
 from config import config
 from llm import llm, LLMQuotaExhausted
 from tools import get_tools_schema, execute_tool
+from tools.flag_tool import FLAG_PATTERNS
 from utils.knowledge_base import search_knowledge
 
 logger = logging.getLogger(__name__)
@@ -240,6 +242,11 @@ SYSTEM_PROMPT = """你是一个专业的 CTF（夺旗赛）自动解题 Agent，
 - **JDWP/RCE**: 拿到 shell 后第一件事 `cat /flag*; find / -name "flag*" 2>/dev/null`
 
 **发现可利用漏洞后，下一步必须是利用它拿 flag，而不是继续找别的漏洞。**
+
+## 高效工具用法
+- **交互式会话**：pwn 本地调试、nc/数据库/ssh 多步交互用 shell_open（会话保持存活）→ shell_send 发输入 → shell_read 读回显，不要反复 run_shell 重建状态
+- **JS 渲染页面**：页面内容靠 JS 生成、或要验证 XSS 触发后的 DOM 变化，用 browser_render（执行 JS 后返回 DOM），curl 看不到的它能看到
+- **flag 自动提交**：任何工具输出里出现 flag{...}，系统会自动提交平台并回填结果——你无需重复提交同一个 flag；看到【自动提交】里"平台确认正确"即可继续找剩余 flag 或收尾
 """
 
 
@@ -256,16 +263,65 @@ CATEGORY_PROMPTS = {
 }
 
 
+# 压缩时保留的关键行模式（flag/凭证/URL/泄露地址/错误——丢了会触发模型重做侦察）
+_SUMMARY_KEY_LINE_RE = re.compile(
+    r"flag|passw|secret|token|key[=:\s]|credential|http|url|jdbc|mysql|admin"
+    r"|0x[0-9a-f]{6,}|uid=|error|exception|denied|success|confirmed",
+    re.I,
+)
+
+
+def _summarize_tool_output(content: str, max_len: int = 400) -> str:
+    """长 tool 结果的摘要：头部 + 关键行（替代纯硬截断，保住侦察关键信息）"""
+    orig = len(content)
+    head = content[:int(max_len * 0.55)]
+    keep = [ln.strip()[:200] for ln in content.splitlines()
+            if _SUMMARY_KEY_LINE_RE.search(ln)][:14]
+    summary = head + ("\n" + "\n".join(keep) if keep else "")
+    if len(summary) > max_len:
+        summary = summary[:max_len]
+    return summary + f"\n...[已压缩: 原文 {orig} 字符，仅保留头部与关键行]..."
+
+
+# 中文否定词（窗口内出现则不算"找到"）
+_SIGNAL_NEGATIONS = ("没", "未", "尚", "别", "无法", "难", "找不到")
+# 英文否定前缀（"haven't found the flag" 不算迹象）
+_SIGNAL_NEG_EN = ("not ", "n't", "haven", "couldn", "didn", "fail")
+
+
+def _flag_text_positive(content: str) -> bool:
+    """文本级「快找到 flag」迹象判定，带否定排除：
+    - 明确正句（"flag 候选"/"已命中 flag"/"found the flag"）→ 迹象
+    - 中文"找到"+附近"flag" → 排除否定前缀（"还没找到 flag" 不算！否则止损永不触发）
+    """
+    if "flag 候选" in content or "已命中 flag" in content or "已获得 flag" in content:
+        return True
+    # 英文正句（含否定排除）
+    for m in re.finditer(r"found the flag|got the flag|flag captured", content, re.I):
+        window = content[max(0, m.start() - 20):m.start()].lower()
+        if not any(neg in window for neg in _SIGNAL_NEG_EN):
+            return True
+    # 中文「找到 ... flag」（含否定排除）
+    for m in re.finditer(r"找到", content):
+        window = content[max(0, m.start() - 4):m.start()]
+        if any(neg in window for neg in _SIGNAL_NEGATIONS):
+            continue
+        tail = content[m.end():m.end() + 12].lower()
+        if "flag" in tail:
+            return True
+    return False
+
+
 def _detect_signal(messages: List[Dict]) -> bool:
     """检测快解出迹象（并行方向暂停其他方向用，省 token）：
-    - extract_flag 命中（"找到 flag"/"已命中 flag"/"flag 候选"）
+    - 文本级：找到 flag / extract_flag 命中（否定句排除，防止损失效）
     - write_file 写 exploit/leak/solve 脚本
     - run_python 输出泄露 libc/堆地址（0x7f 开头十六进制）
     """
     for m in messages[-8:]:  # 只看最近几轮
         content = m.get("content", "")
         if isinstance(content, str):
-            if ("找到" in content and "flag" in content) or "已命中 flag" in content or "flag 候选" in content:
+            if _flag_text_positive(content):
                 return True
             if re.search(r"0x7f[0-9a-f]{10,}", content):
                 return True
@@ -289,6 +345,57 @@ CATEGORY_TIPS = {
 }
 GENERIC_TIP = "flag 若不在当前方向，换攻击面而非同一终点的变体（试其他功能/入口/接口）。"
 
+# 卡死时并行子 Agent 的备选方向（按题型；每题只补一个方向，防 token 翻倍）
+_ALT_DIRECTIONS = {
+    "web": ["专注 SQL 注入/后台弱口令 → 进数据库或后台 dump flag",
+            "专注文件上传/LFI/命令注入 → 拿 webshell 读 flag 文件"],
+    "pwn": ["专注格式化字符串/泄露 → ret2libc 完整利用链",
+            "专注堆利用（tcache/UAF/fastbin）→ 劫持执行流"],
+    "crypto": ["专注 RSA 参数弱点（Wiener/共模/小指数/Fermat）",
+               "专注编码套娃/古典密码/哈希分析"],
+    "misc": ["专注隐写（通道分离/zsteg/binwalk/音频）",
+             "专注流量/内存取证 → 文件提取"],
+}
+
+
+def _maybe_spawn_parallel_child(agent: "Agent", task: str) -> str:
+    """T2-⑦ 卡死时同题多方向并行：主方向无迹象达阈值 → 起一个不同方向的子 Agent 并行。
+
+    两个方向共享 _solved_event：任一方向提交正确 → 事件置位 → 另一方下轮退出。
+    返回附加到换思路提示末尾的说明文字（不追加独立 user 消息，避免消息错乱）。
+    """
+    if not config.MULTI_DIRECTION_ENABLED or agent.direction or agent._child_thread:
+        return ""
+    # easy 题预算紧（快速止损换题），不值得多方向并行烧 token
+    if agent.budget["no_progress_hint"] <= 30:
+        return ""
+    if agent.category not in _ALT_DIRECTIONS:
+        return ""
+    direction = _ALT_DIRECTIONS[agent.category][0]
+    task_text = agent._task_text
+    solved_event = agent._solved_event
+    ch_id = agent.challenge_id
+    cat = agent.category
+
+    def _run_child():
+        try:
+            child = build_agent(cat, direction=direction, challenge_id=ch_id)
+            child._task_text = task_text
+            child._solved_event = solved_event
+            child.run(task_text, verbose=False,
+                      max_iterations=config.PARALLEL_ROUNDS, stop_event=solved_event)
+        except LLMQuotaExhausted:
+            pass  # 子方向配额耗尽不炸主方向；主方向下次调用会自行抛出
+        except Exception as e:
+            logger.warning(f"并行方向子 Agent 异常退出: {e}")
+
+    agent._child_thread = threading.Thread(
+        target=_run_child, daemon=True, name=f"alt-{cat}-{ch_id}")
+    agent._child_thread.start()
+    print(f"  🌿 卡死触发：已并行启动不同方向子 Agent（{direction}）")
+    return (f" 同时已另起一个不同方向并行的子 Agent（{direction}），"
+            "哪个方向先提交成功即完成解题——专注本方向，不要等对方。")
+
 
 def build_agent(category: str = "", direction: str = "", **kwargs):
     """子 Agent 工厂：按题型生成专用 system_prompt + 工具子集。
@@ -305,7 +412,8 @@ def build_agent(category: str = "", direction: str = "", **kwargs):
 
 
 class Agent:
-    def __init__(self, system_prompt: str = SYSTEM_PROMPT, category: str = "", direction: str = ""):
+    def __init__(self, system_prompt: str = SYSTEM_PROMPT, category: str = "", direction: str = "",
+                 challenge_id: str = "", temperature: float = None, budget: dict = None):
         # KV Cache 友好：system prompt 必须是静态常量，工具注册也静态生成（勿动态注入时间/状态）。
         # 动态信息（时间戳/变色内容）只能作为新消息 append 到 messages 末尾，绝不改 system prompt。
         self.messages: List[Dict] = [{"role": "system", "content": system_prompt}]
@@ -314,33 +422,95 @@ class Agent:
         self.tools = get_tools_schema(category)
         self.direction = direction  # 并行方向（多方向并行时各自专注；无进展提示带方向约束用）
         self.category = category  # 题型（换思路提示按题型给攻击面方向用）
+        self.challenge_id = challenge_id  # 自动提交 flag 用（平台提交 API 需要 unique_code）
+        self.llm_temperature = temperature  # None→全局配置；重试轮传更高温强制方向多样性
+        # 动态预算（按难度）：无迹象提示轮数 / 提示后止损轮数（easy 紧、hard 松）
+        self.budget = {"no_progress_hint": 50, "no_progress_giveup": 15}
+        if budget:
+            self.budget.update(budget)
         self.found_flag = False
         self.submitted = False
         self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
         self._no_flag_rounds = 0  # 连续无 extract_flag/submit_flag 动作的轮数（B1 失败收敛检测）
         self._flag_hint_done = False  # 聚焦提 flag 提示只发一次
         self._run_log: List[Dict] = []  # per-round 详细日志（用于导出，不进入 LLM 上下文）
+        self._auto_submitted: set = set()  # 自动提交钩子已提交过的 flag（防重复提交）
+        self._solved_event = None  # 多方向并行：任一方向提交正确 → set，其他方向提前停
+        self._child_thread = None  # 多方向并行子 Agent 线程（run 结束时 join 收尾）
+        self._task_text = ""  # 原始任务（多方向并行子 Agent 需要同一题目任务）
 
     def _compress_history(self, threshold: int = 40, keep_tail: int = 10, max_len: int = 400):
-        """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果截断为摘要。
+        """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果压缩为摘要。
 
         - 只压缩"system 之后、尾部 keep_tail 条之前"的 tool 消息 content
         - 保留 role/tool_call_id 结构 → assistant.tool_calls → tool 响应链完整（deepseek 要求）
-        - 长 body 截断为 max_len + 压缩标记，降低后段轮次 LLM 延迟
+        - 摘要 = 头部 + 关键行（flag/凭证/URL/泄露地址等），而非硬截断——
+          硬截断会丢掉早期侦察关键信息，模型会重做侦察多烧轮次
         """
         if len(self.messages) <= threshold:
             return
         for i in range(1, len(self.messages) - keep_tail):
             m = self.messages[i]
             if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > max_len:
-                orig = len(m["content"])
-                m["content"] = m["content"][:max_len] + f"\n...[已压缩: 原文 {orig} 字符]..."
+                m["content"] = _summarize_tool_output(m["content"], max_len)
+
+    def _auto_submit_flags(self, raw_result: str, result_str: str) -> str:
+        """T1 自动提交钩子：工具输出里出现新 flag → 直接提交平台，结果回填 tool 消息。
+
+        不依赖模型自觉调 submit_flag（实测模型常找到 flag 后先写长分析甚至忘提交）。
+        错提无惩罚（平台判 incorrect 不扣分），漏提/晚提才亏轮次。
+        """
+        if not self.challenge_id or self.submitted:
+            return result_str
+        found: List[str] = []
+        for pat in FLAG_PATTERNS:
+            try:
+                found.extend(re.findall(pat, raw_result))
+            except re.error:
+                pass
+        outs = []
+        for flag in dict.fromkeys(found):
+            if flag in self._auto_submitted:
+                continue
+            self._auto_submitted.add(flag)
+            _t0 = time.time()
+            sr = execute_tool("submit_flag", {"flag": flag, "challenge_id": self.challenge_id})
+            sr_str = str(sr)
+            ok = "[提交成功]" in sr_str
+            if self._run_log:
+                self._run_log[-1]["tool_calls"].append({
+                    "name": "_auto_submit",
+                    "arguments": {"flag": flag},
+                    "elapsed_sec": round(time.time() - _t0, 2),
+                    "result_preview": sr_str[:500],
+                    "result_full_len": len(sr_str),
+                })
+            logger.info(f"自动提交 flag: {flag} → {'成功' if ok else '不正确'}")
+            if ok:
+                self.found_flag = True
+                _mc = re.search(r'"correct_flag_count":\s*(\d+)', sr_str)
+                _tc = re.search(r'"total_flag_count":\s*(\d+)', sr_str)
+                if not (_mc and _tc and int(_mc.group(1)) < int(_tc.group(1))):
+                    self.submitted = True
+                    if self._solved_event:
+                        self._solved_event.set()
+                outs.append(f"{flag} → ✅ 平台确认正确")
+            else:
+                outs.append(f"{flag} → ❌ 平台判定不正确")
+        if outs:
+            result_str = result_str + (
+                "\n\n【自动提交】" + "；".join(outs)
+                + ("\n已全部提交成功，若题目确认完成可停止解题。"
+                   if self.submitted else
+                   "\n不正确说明该 flag 是假的/中间产物，需通过真实漏洞利用拿最终输出。继续解题。")
+            )
+        return result_str
 
     def _call_llm(self) -> str:
         """调用 LLM，处理 tool_calls"""
         import time as _time
         _t0 = _time.time()
-        response = llm.chat(self.messages, tools=self.tools)
+        response = llm.chat(self.messages, tools=self.tools, temperature=self.llm_temperature)
         _llm_elapsed = round(_time.time() - _t0, 2)
         choice = response.choices[0]
         msg = choice.message
@@ -422,11 +592,21 @@ class Agent:
                     "result_full_len": _orig_len,
                 })
 
+            # ── T1 自动提交钩子：工具输出出现新 flag → 直接提交平台（submit_flag 工具自身的
+            #    调用不走此钩子，由下方分支处理；其 flag 已入 _auto_submitted 防重复）──
+            if name == "submit_flag" and isinstance(args.get("flag"), str):
+                self._auto_submitted.add(args["flag"].strip())
+            elif not self.submitted and self.challenge_id:
+                result_str = self._auto_submit_flags(str(result), result_str)
+
             # 检测 flag 提交
             # 仅当 submit_flag 返回「提交成功」（真提交到平台）才视为完成；
             # 返回「本地模式/失败」时不要设 submitted，让 Agent 继续解题
             if name == "submit_flag":
                 if "提交成功" in result_str or "correct" in str(result_str).lower():
+                    self.found_flag = True
+                    if self._solved_event:
+                        self._solved_event.set()
                     # 多 flag 题：提交成功但还有未提交的 flag → 不停止，提示继续找剩余 flag
                     _mc = re.search(r'"correct_flag_count":\s*(\d+)', result_str)
                     _tc = re.search(r'"total_flag_count":\s*(\d+)', result_str)
@@ -500,6 +680,9 @@ class Agent:
         """
         # 多方向并行时限制轮次（防止多个并行 agent 各跑满 MAX_ITERATIONS 烧 token）
         iter_limit = max_iterations or config.MAX_ITERATIONS
+        # 多方向并行基础设施：任一方向提交正确 → 事件置位 → 其他方向提前停
+        self._solved_event = stop_event if stop_event is not None else threading.Event()
+        self._task_text = task  # 并行子 Agent 需要同一题目任务
         # 解题前先检索相关知识
         knowledge = search_knowledge(task)
         if knowledge:
@@ -520,18 +703,19 @@ class Agent:
         no_progress_advised = False  # 是否已注入过换思路提示
         while self.iteration < iter_limit:
             # 并行停止信号：其他方向已找到 flag → 本方向提前停止（省 token）
-            if stop_event is not None and stop_event.is_set():
+            if self._solved_event is not None and self._solved_event.is_set():
                 print("  ⏹️ 其他方向已找到 flag，本方向提前停止")
                 break
             self.iteration += 1
-            # 无进展检测（基于上一轮状态）：连续调工具、未找到 flag **且无解出迹象**（50 轮）→ 注入换思路提示。
+            # 无进展检测（基于上一轮状态）：连续调工具、未找到 flag **且无解出迹象** → 注入换思路提示。
             # 有迹象（正在写 exploit/泄露地址，快出来了）→ 重置计数，不打断。
+            # 阈值按难度动态预算（easy 紧止损省 token，hard 松止损多给机会）
             if self.iteration > 3:
                 if self._last_has_tool_calls and not self.found_flag and not _detect_signal(self.messages):
                     no_progress_rounds += 1
                 else:
                     no_progress_rounds = 0
-                if no_progress_rounds >= 50 and not no_progress_advised:
+                if no_progress_rounds >= self.budget["no_progress_hint"] and not no_progress_advised:
                     no_progress_advised = True
                     no_progress_rounds = 0
                     # 并行方向约束：有 direction（多方向并行 agent）→ 提示坚持本方向换方法，防跑偏到其他方向
@@ -543,11 +727,13 @@ class Agent:
                         # 无 direction（单 agent）：按题型给攻击面方向（避免同一终点的变体里打转）
                         tip = ("【系统提示】已连续多轮调用工具但未找到 flag。"
                                + CATEGORY_TIPS.get((self.category or "").lower(), GENERIC_TIP)
-                               + "继续解题。")
+                               + "继续解题。"
+                               # 卡死触发：主方向另起一个不同方向并行子 Agent（共享 solved_event）
+                               + _maybe_spawn_parallel_child(self, task))
                     self.messages.append({"role": "user", "content": tip})
-                    print("  ⚠️ 无迹象 50 轮，已注入换思路提示")
-                elif no_progress_advised and no_progress_rounds >= 15:
-                    # 无迹象提示后再 15 轮仍无进展 → 强制止损进下一题（防卡题空耗，log3-1 的 83 分钟）
+                    print(f"  ⚠️ 无迹象 {self.budget['no_progress_hint']} 轮，已注入换思路提示")
+                elif no_progress_advised and no_progress_rounds >= self.budget["no_progress_giveup"]:
+                    # 无迹象提示后再 N 轮仍无进展 → 强制止损进下一题（防卡题空耗，log3-1 的 83 分钟）
                     print(f"  ⏹️ 无迹象提示后再 {no_progress_rounds} 轮无进展，强制止损")
                     break
             print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
@@ -603,11 +789,22 @@ class Agent:
                 self.messages.append({"role": "user", "content": phase_hint})
                 print(f"  📌 进度推进提示（第 {self.iteration} 轮，检查阶段）")
 
+        # 等并行子方向收尾（最多 3min）：子方向的提交走平台 API，不依赖 join 结果
+        if self._child_thread is not None and self._child_thread.is_alive():
+            print("  ⏳ 等待并行子方向收尾...")
+            self._child_thread.join(timeout=180)
+
         status = {
             "success": self.submitted,
             "flag_found": self.found_flag,
             "iterations": self.iteration,
-            "final_message": self.messages[-1].get("content", "") if self.messages else "",
+            # 取最后一条 assistant 消息（循环以失败/提交 break 时 messages[-1] 是 tool 结果，
+            # 直接取会把工具原始输出当"解题方向"存进经验库，污染后续题）
+            "final_message": next(
+                (m.get("content", "") for m in reversed(self.messages)
+                 if m.get("role") == "assistant" and m.get("content")),
+                self.messages[-1].get("content", "") if self.messages else "",
+            ),
             "run_log": self._run_log,
         }
 

@@ -286,7 +286,86 @@ def list_challenges() -> List[Dict]:
     return challenges
 
 
-def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
+def _quick_prerecon(addr_str: str) -> str:
+    """T1-③ 轻量预侦察：连通性 + HTTP 头 + 首页摘要 + whatweb 指纹。
+
+    agent.run 之前跑确定性脚本，结果拼进 task——agent 第一轮就站在侦察结果上，
+    省掉 5-10 轮手工探测。失败只降级（返回空/部分信息），绝不影响解题流程。
+    """
+    from tools.base import run_cmd
+    parts = []
+    for addr in [a.strip() for a in addr_str.split(",") if a.strip()][:2]:
+        url = addr if addr.startswith("http") else f"http://{addr}"
+        sec = [f"### 目标 {url}"]
+        # 连通性 + HTTP 响应头
+        head = run_cmd(f"curl -sS -m 8 -i '{url}'", timeout=15)
+        if not head or "执行错误" in head or "Connection refused" in head or "Could not resolve" in head:
+            sec.append("[连通性异常] curl 连不上——若非 HTTP 服务可能是 pwn/crypto 题，忽略此报告；"
+                       "若确为 web 题请检查 VPN/网络后再试")
+        else:
+            sec.append("[HTTP 响应头+状态]\n" + head[:600])
+            # whatweb 指纹（识别框架/语言/CMS）
+            what = run_cmd(f"whatweb -a 1 --no-errors '{url}'", timeout=45)
+            if what and "执行错误" not in what:
+                sec.append("[技术栈指纹]\n" + what[:500])
+            # 首页正文摘要（找登录框/注释/线索）
+            body = run_cmd(f"curl -sS -m 8 '{url}' | head -c 2500", timeout=15)
+            if body:
+                sec.append("[首页正文前 2500 字符]\n" + body[:2500])
+        parts.append("\n".join(sec))
+    report = "\n\n".join(parts)
+    return report[:3000]
+
+
+# ── T1-② 死路地图：记录每题首轮尝试情况，重试轮注入，避免二刷重走死路 ──
+_ATTEMPT_HISTORY: Dict[str, Dict] = {}
+_ATTEMPT_LOCK = threading.Lock()
+
+
+def _record_attempt(unique_code: str, agent, submit_results: list, final_msg: str, rounds: int):
+    """记录一次尝试的工具使用统计/错误 flag/最终结论（内存中，仅本次运行）"""
+    from collections import Counter
+    try:
+        counter = Counter()
+        for m in agent.messages:
+            for tc in m.get("tool_calls", []) or []:
+                fn = (tc.get("function") or {}).get("name", "")
+                if fn:
+                    counter[fn] += 1
+        wrong_flags = []
+        for sr in submit_results:
+            r = sr.get("result")
+            if not (isinstance(r, dict) and r.get("correct")):
+                wrong_flags.append(sr.get("flag", ""))
+        with _ATTEMPT_LOCK:
+            _ATTEMPT_HISTORY[unique_code] = {
+                "rounds": rounds,
+                "tools": counter.most_common(8),
+                "wrong_flags": [f for f in wrong_flags if f][:10],
+                "last_direction": re.sub(
+                    r'(?:flag|FLAG|ctf|CTF)\{[^}]{0,200}\}', '[FLAG]', (final_msg or "").strip())[:150],
+            }
+    except Exception:
+        pass
+
+
+def _build_deadend_hint(code: str) -> str:
+    """重试轮的死路地图提示（无记录返回空串）"""
+    with _ATTEMPT_LOCK:
+        h = dict(_ATTEMPT_HISTORY.get(code) or {})
+    if not h:
+        return ""
+    lines = [f"上一轮已尝试 {h.get('rounds', '?')} 轮未解出。必须换攻击面，不要重复上次的做法："]
+    if h.get("tools"):
+        lines.append("已用工具（频次）: " + ", ".join(f"{n}×{c}" for n, c in h["tools"]))
+    if h.get("wrong_flags"):
+        lines.append("已提交且被平台判错（勿再提交）: " + ", ".join(h["wrong_flags"]))
+    if h.get("last_direction"):
+        lines.append(f"上一轮最终结论: {h['last_direction']}")
+    return "\n".join(lines)
+
+
+def solve_challenge(challenge: Dict, progress: Dict, retry_hint: str = "", retry_round: bool = False) -> Dict:
     """
     解单道题
 
@@ -350,6 +429,14 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
     addr_str = ", ".join(container_addrs)
     print(f"  容器地址: {addr_str}")
 
+    # T1-③ 预侦察（确定性脚本，失败不影响解题流程）
+    prerecon_report = ""
+    try:
+        print(f"  🔍 预侦察中...")
+        prerecon_report = _quick_prerecon(addr_str)
+    except Exception as e:
+        logger.warning(f"预侦察异常（忽略）: {e}")
+
     # 2. 构造题目描述（含同类题经验注入，省轮次）
     # 题型从 unique_code 前缀推导（web_/crypto_/pwn_/misc_）
     cat = _infer_category(unique_code, desc)
@@ -376,9 +463,19 @@ def solve_challenge(challenge: Dict, progress: Dict) -> Dict:
 Flag 数量: {flag_count}
 靶场容器地址: {addr_str}
 
+## 预侦察报告（脚本自动探测，仅作起点，结论需自行验证）
+{prerecon_report if prerecon_report else '（预侦察无有效信息，可能非 HTTP 服务，自行探测）'}
+
 ## 同类题经验（沉淀自之前运行，方法论级）
 {lessons_hint if lessons_hint else '（无此前同类题经验）'}
-
+"""
+    # T1-② 重试轮注入死路地图：让二刷带着首轮的失败地图跑（必须换思路）
+    if retry_hint:
+        task += f"""
+## 上次尝试死路地图（重试轮，务必换攻击面，不要重复上次的做法）
+{retry_hint}
+"""
+    task += f"""
 注意:
 - 靶场地址通过 VPN 直连访问
 - 这道题有 {flag_count} 个 flag，需要分别获取和提交
@@ -393,7 +490,17 @@ Flag 数量: {flag_count}
 
     # 3. Agent 解题（按题型分派子 Agent：专用 prompt + 工具子集 + 经验注入）
     print(f"\n[2/5] Agent 解题...")
-    agent = build_agent(cat)
+    # T2-⑧ 动态预算：easy 紧止损（快速放弃换题），hard 松止损（多给机会）
+    _d = (diff or "").lower()
+    if "easy" in _d:
+        budget = {"no_progress_hint": 30, "no_progress_giveup": 8}
+    elif "medium" in _d or "med" in _d:
+        budget = {"no_progress_hint": 45, "no_progress_giveup": 12}
+    else:
+        budget = {"no_progress_hint": 55, "no_progress_giveup": 18}
+    # T1-② 重试轮温度提升：强制方向多样性，避免和首轮一模一样的二刷
+    temp = min(1.0, config.LLM_TEMPERATURE + 0.25) if retry_round else None
+    agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
     # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
     # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
@@ -494,6 +601,9 @@ Flag 数量: {flag_count}
     # 更新进度（锁内写入，避免并发线程写坏）
     if submitted_flags:
         _update_progress(progress, lambda p: p["submitted_flags"].__setitem__(unique_code, list(submitted_flags)))
+
+    # T1-② 记录本轮尝试情况（重试轮的死路地图素材）
+    _record_attempt(unique_code, agent, submit_results, final_msg, result.get("iterations", 0))
 
     # 检查是否通关（API 查询在锁外做，避免持锁期间阻塞）
     challenges = tsec_api.list_challenges()
@@ -683,7 +793,8 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                             if not challenge:
                                 continue
                             print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
-                            f = ex.submit(solve_challenge, challenge, progress)
+                            f = ex.submit(solve_challenge, challenge, progress,
+                                          retry_hint=_build_deadend_hint(code), retry_round=True)
                             retry_inflight[f] = challenge
                         return retry_idx
 

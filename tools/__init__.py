@@ -32,6 +32,10 @@ from tools.forensics_triage_tool import (
 )
 from tools.auth_tool import hash_crack, jwt_tool, flask_unsign
 from tools.crypto_ext_tool import classical_cipher, lattice_lll, php_filter_chain
+from tools.shell_session_tool import (
+    shell_open, shell_send, shell_read, shell_close, shell_list,
+)
+from tools.browser_tool import browser_render, browser_screenshot
 
 __all__ = [
     "TOOL_REGISTRY",
@@ -68,4 +72,8 @@ __all__ = [
     "hash_crack", "jwt_tool", "flask_unsign",
     # Crypto 扩展
     "classical_cipher", "lattice_lll", "php_filter_chain",
+    # 持久化 shell 会话
+    "shell_open", "shell_send", "shell_read", "shell_close", "shell_list",
+    # 无头浏览器
+    "browser_render", "browser_screenshot",
 ]

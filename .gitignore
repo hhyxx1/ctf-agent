@@ -32,3 +32,20 @@ f[0-9]-*/
 hydra.restore
 output_dec/
 tasks.json
+
+# ── 解题产物（webshell/截图/下载文件/临时脚本——含 cookies 等敏感数据）──
+cookies*.txt
+exploit*.php
+shell.php*
+shell_*.jpg
+shell.jpg
+*.bin
+page.html
+.htaccess
+htaccess_test
+control.txt
+46501.py
+download_attachments.py
+organize_attachments.py
+sdk.php
+test.php

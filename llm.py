@@ -35,8 +35,17 @@ class LLMQuotaExhausted(Exception):
 
 
 def _classify_error(err) -> str:
-    """把异常/错误文本分类为 quota(不可重试) / transient(可重试) / unknown(保守重试)"""
+    """把异常/错误文本分类为 quota(不可重试) / transient(可重试) / unknown(保守重试)
+
+    注意顺序：先判明确的 429（很多平台 429 报错文本里含 "window" 字样，
+    如 "rate limit window exceeded"——若先匹配 quota 关键词会误判成配额耗尽，
+    把临时限流当成整轮终止，直接卡死解题率）。
+    """
     text = f"{err}".lower()
+    # 明确 429 / too many requests → 一定是临时限流，优先于一切 quota 关键词
+    status = getattr(err, "status_code", None) or getattr(err, "code", None)
+    if str(status) == "429" or "429" in text or "too many requests" in text:
+        return "transient"
     for kw in _QUOTA_EXHAUSTED_KEYWORDS:
         if kw.lower() in text:
             return "quota"
@@ -135,13 +144,13 @@ class LLM:
         message = SimpleNamespace(content=msg.get("content") or "", tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
-    def chat(self, messages, tools=None, tool_choice="auto"):
-        """调用大模型，支持 function calling"""
+    def chat(self, messages, tools=None, tool_choice="auto", temperature=None):
+        """调用大模型，支持 function calling（temperature 传入则覆盖全局配置，重试轮多样性用）"""
         kwargs = {
             "model": config.LLM_MODEL,
             "messages": messages,
             "max_tokens": config.LLM_MAX_TOKENS,
-            "temperature": config.LLM_TEMPERATURE,
+            "temperature": config.LLM_TEMPERATURE if temperature is None else temperature,
             "stream": False,
         }
         if tools:

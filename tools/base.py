@@ -177,6 +177,7 @@ CATEGORY_TOOLS = {
     "web": ["http_request", "dir_scan", "web_fingerprint", "sqli_scan", "vuln_scan",
             "proxy_scan", "nmap_scan", "hydra_brute", "ssrf_metadata", "service_vuln_scan",
             "full_recon", "searchsploit_query", "jwt_tool", "flask_unsign", "php_filter_chain",
+            "browser_render", "browser_screenshot",
             "run_shell"],
     "pwn": ["binary_analyze", "exploit_template", "rop_gadget_search", "vuln_pattern_scan",
             "ghidra_decompile", "shellcode_encode", "msfvenom_payload",
@@ -189,9 +190,11 @@ CATEGORY_TOOLS = {
              "hash_crack", "classical_cipher", "run_python", "run_shell"],
 }
 # 通用兜底工具：所有子 Agent 都有（run_shell 万能可解一切，分类错不无解）
+# 持久化 shell 会话通用（pwn 交互/misc nc/web 数据库都用得上）
 COMMON_TOOLS = ["run_shell", "read_file", "write_file", "http_request", "run_python",
                 "list_dir", "analyze_file", "extract_flag", "submit_flag",
-                "check_conn", "wordlist", "full_recon", "env_selfcheck", "searchsploit_query"]
+                "check_conn", "wordlist", "full_recon", "env_selfcheck", "searchsploit_query",
+                "shell_open", "shell_send", "shell_read", "shell_close", "shell_list"]
 
 
 def get_tools_schema(category: str = ""):

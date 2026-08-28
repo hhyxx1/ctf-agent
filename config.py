@@ -138,6 +138,8 @@ class Config:
     LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
     # LLM 重试退避基数（秒），实际等待 = base * 2^attempt + 随机抖动；429 优先用服务端 Retry-After
     LLM_BACKOFF_BASE_SEC: float = float(os.getenv("LLM_BACKOFF_BASE_SEC", "2.0"))
+    # 卡死时同题多方向并行（无迹象达阈值 → 另起不同方向子 Agent，任一提交成功即停）
+    MULTI_DIRECTION_ENABLED: bool = os.getenv("MULTI_DIRECTION", "true").lower() in ("true", "1", "yes", "on")
 
     # ── 运行控制 ──
     # 自启: 镜像启动后是否立即开始解题（托管模式必须为 true）
