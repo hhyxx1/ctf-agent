@@ -36,7 +36,7 @@ FORBIDDEN_FILES = [
 ]
 # 合法工作目录（runner 复制题目的临时目录），允许访问
 ALLOWED_WORKDIRS = list(getattr(config, "ALLOWED_WORKDIRS", None) or ["/tmp/"])
-AUDIT_LOG = os.path.join(config.OUTPUT_DIR, "anti_cheat.log")
+AUDIT_LOG = os.path.join(config.RUN_LOG_DIR, "anti_cheat.log")
 
 # ── 比赛外联限制（规则：所有通信须经平台白名单端点，禁止与外部通信，后期流量审计）──
 # 外部站点黑名单：agent 不得访问（搜索引擎/社区/社交等，读了也不解题，且违规）

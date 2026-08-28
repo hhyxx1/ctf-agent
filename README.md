@@ -100,7 +100,7 @@ FORBIDDEN_PATHS=["/data/my-benchmark","/data/answers","metadata/solution"]
 ALLOWED_WORKDIRS=["/tmp/chal_"]
 ```
 
-所有工具调用都会经过 `tools/base.py` 的反作弊检查：命中禁止路径即拦截并记入审计日志 `output/anti_cheat.log`。
+所有工具调用都会经过 `tools/base.py` 的反作弊检查：命中禁止路径即拦截并记入审计日志 `output/logs_<运行时间戳>/anti_cheat.log`（每次运行独立目录）。
 
 ## 大模型网关（可选，托管环境专用）
 

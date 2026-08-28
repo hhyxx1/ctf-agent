@@ -63,8 +63,9 @@ def _safe_close(unique_code: str) -> bool:
 # ── 运行日志导出 ──────────────────────────────────────────────────────────
 # 每次跑完导出到 output/logs_<run>/，单题一份 JSON + 一份总览 RUN_SUMMARY.json
 
-TB_RUN_ID = time.strftime("%Y%m%d_%H%M%S")
-TB_LOG_DIR = os.path.join("output", f"logs_{TB_RUN_ID}")
+# 运行日志目录：统一用 config.RUN_LOG_DIR（进程启动时生成，审计日志/单题日志/总览同目录）
+TB_RUN_ID = config.RUN_ID
+TB_LOG_DIR = config.RUN_LOG_DIR
 TB_LOG_MANIFEST = os.path.join(TB_LOG_DIR, "manifest.json")
 
 

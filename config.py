@@ -16,6 +16,7 @@
 """
 import os
 import json
+import time
 from dotenv import load_dotenv
 
 # 本地模式加载 .env（托管环境无此文件，load_dotenv 会静默跳过）
@@ -163,9 +164,12 @@ class Config:
     ATTACHMENTS_DIR: str = os.path.join(WORK_DIR, "attachments")
     OUTPUT_DIR: str = os.path.join(WORK_DIR, "output")
     KNOWLEDGE_DIR: str = os.path.join(WORK_DIR, "knowledge")
+    # 每次运行的专属日志目录（进程启动时生成，一次运行一个目录；审计日志/单题日志/总览都在这）
+    RUN_ID: str = time.strftime("%Y%m%d_%H%M%S")
+    RUN_LOG_DIR: str = os.path.join(OUTPUT_DIR, f"logs_{RUN_ID}")
 
 
 config = Config()
 
-for d in [config.ATTACHMENTS_DIR, config.OUTPUT_DIR, config.KNOWLEDGE_DIR]:
+for d in [config.ATTACHMENTS_DIR, config.OUTPUT_DIR, config.KNOWLEDGE_DIR, config.RUN_LOG_DIR]:
     os.makedirs(d, exist_ok=True)
