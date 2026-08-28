@@ -313,24 +313,20 @@ def _flag_text_positive(content: str) -> bool:
 
 
 def _detect_signal(messages: List[Dict]) -> bool:
-    """检测快解出迹象（并行方向暂停其他方向用，省 token）：
-    - 文本级：找到 flag / extract_flag 命中（否定句排除，防止损失效）
-    - write_file 写 exploit/leak/solve 脚本
-    - run_python 输出泄露 libc/堆地址（0x7f 开头十六进制）
+    """检测快解出迹象（并行方向暂停其他方向用，省 token）——只认强事件：
+    - assistant 消息里出现真 flag 文本（tool 输出不算：web 题读二进制时 0x7f/垃圾太常见）
+    - 提交/提取 flag 的工具调用（submit_flag / extract_flag）
+    注意：不再把「写 exploit 脚本」「输出含 0x7f 泄露地址」当迹象——这些在 web/多阶段题里
+    每几轮就出现一次，会让并行方向永远不提前停。
     """
     for m in messages[-8:]:  # 只看最近几轮
-        content = m.get("content", "")
-        if isinstance(content, str):
-            if _flag_text_positive(content):
-                return True
-            if re.search(r"0x7f[0-9a-f]{10,}", content):
+        if m.get("role") == "assistant":
+            content = m.get("content", "")
+            if isinstance(content, str) and _flag_text_positive(content):
                 return True
         for tc in m.get("tool_calls", []) or []:
             fn = (tc.get("function") or {}).get("name", "")
-            args_str = (tc.get("function") or {}).get("arguments", "") or ""
-            if fn == "write_file" and any(k in args_str for k in ["exploit", "solve_", "pwn", "leak"]):
-                return True
-            if fn == "submit_flag":
+            if fn in ("submit_flag", "extract_flag"):
                 return True
     return False
 
@@ -451,8 +447,15 @@ class Agent:
             return
         for i in range(1, len(self.messages) - keep_tail):
             m = self.messages[i]
-            if m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > max_len:
-                m["content"] = _summarize_tool_output(m["content"], max_len)
+            role = m.get("role")
+            content = m.get("content")
+            if role == "tool" and isinstance(content, str) and len(content) > max_len:
+                m["content"] = _summarize_tool_output(content, max_len)
+            elif role == "assistant" and isinstance(content, str) and len(content) > 600 \
+                    and not m.get("tool_calls"):
+                # assistant 长分析同样压缩（c-03 跑到 98 轮时单轮 141k token 的主因之一：
+                # 每轮几百字的分析全文永久留在上下文里，只压 tool 消息拦不住线性膨胀）
+                m["content"] = _summarize_tool_output(content, max_len)
 
     def _auto_submit_flags(self, raw_result: str, result_str: str) -> str:
         """T1 自动提交钩子：工具输出里出现新 flag → 直接提交平台，结果回填 tool 消息。
@@ -710,11 +713,12 @@ class Agent:
                 print("  ⏹️ 其他方向已找到 flag，本方向提前停止")
                 break
             self.iteration += 1
-            # 无进展检测（基于上一轮状态）：连续调工具、未找到 flag **且无解出迹象** → 注入换思路提示。
-            # 有迹象（正在写 exploit/泄露地址，快出来了）→ 重置计数，不打断。
+            # 无进展检测（基于上一轮状态）：「进展」只认 flag 事件（提交正确/extract 命中 → found_flag 置位）。
+            # 不再用 _detect_signal 宽松迹象重置计数——之前 web 题读二进制输出里到处是 0x7f、
+            # 每几轮写一次 exploit 脚本，计数反复归零，实际跑出 98 轮/790 万 token 的灾难（log c-03）。
             # 阈值按难度动态预算（easy 紧止损省 token，hard 松止损多给机会）
             if self.iteration > 3:
-                if self._last_has_tool_calls and not self.found_flag and not _detect_signal(self.messages):
+                if self._last_has_tool_calls and not self.found_flag:
                     no_progress_rounds += 1
                 else:
                     no_progress_rounds = 0
@@ -739,7 +743,7 @@ class Agent:
                     # 无迹象提示后再 N 轮仍无进展 → 强制止损进下一题（防卡题空耗，log3-1 的 83 分钟）
                     print(f"  ⏹️ 无迹象提示后再 {no_progress_rounds} 轮无进展，强制止损")
                     break
-            print(f"\n--- 轮次 {self.iteration}/{config.MAX_ITERATIONS} ---")
+            print(f"\n--- 轮次 {self.iteration}/{iter_limit} ---")
 
             try:
                 result = self._call_llm()
