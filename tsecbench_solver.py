@@ -51,6 +51,9 @@ def _update_progress(progress, mutate):
 # 在途容器登记（unique_code → True）：双击 Ctrl+C 打断收尾时仍能清理，防容器泄漏
 _ACTIVE_CONTAINERS: Dict[str, bool] = {}
 
+# 全局停止信号：用户第一次 Ctrl+C 时 set，所有在途 agent 当前轮做完立即收尾
+_RUN_STOP = threading.Event()
+
 
 def _safe_close(unique_code: str) -> bool:
     """关闭容器释放资源（失败不抛异常，避免干扰主流程）。"""
@@ -530,6 +533,7 @@ Flag 数量: {flag_count}
     # T1-② 重试轮温度提升：强制方向多样性，避免和首轮一模一样的二刷
     temp = min(1.0, config.LLM_TEMPERATURE + 0.25) if retry_round else None
     agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
+    agent.global_stop = _RUN_STOP  # Ctrl+C 时让 agent 当前轮做完就收尾（不等几百轮跑完）
     # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
     # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
@@ -787,64 +791,76 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
 
     try:
         with ThreadPoolExecutor(max_workers=MAX_INFLIGHT) as ex:
-            idx = _fill_slots(ex, inflight, idx)
-            while inflight and not quota_exhausted:
-                done, _ = wait(list(inflight.keys()), return_when=FIRST_COMPLETED)
-                for f in done:
-                    ch = inflight.pop(f)
-                    if _collect(f, ch):
-                        quota_exhausted = True
+            try:
+                idx = _fill_slots(ex, inflight, idx)
+                while inflight and not quota_exhausted:
+                    done, _ = wait(list(inflight.keys()), return_when=FIRST_COMPLETED)
+                    for f in done:
+                        ch = inflight.pop(f)
+                        if _collect(f, ch):
+                            quota_exhausted = True
+                    if not quota_exhausted:
+                        idx = _fill_slots(ex, inflight, idx)
+                    # 配额耗尽时不再补槽：剩余在途题的 agent 会在下次 LLM 调用时同样抛出
+                    # LLMQuotaExhausted 并自行关闭容器/导出日志，循环继续排空即可
+
+                # P2-④ 两轮制重试（MoMo-agent 借鉴）：跑完一轮后，第二轮优先重试 failed 题
+                # 注意：必须在同一个 with 块内提交，否则 executor 已 shutdown，submit 直接报错
                 if not quota_exhausted:
-                    idx = _fill_slots(ex, inflight, idx)
-                # 配额耗尽时不再补槽：剩余在途题的 agent 会在下次 LLM 调用时同样抛出
-                # LLMQuotaExhausted 并自行关闭容器/导出日志，循环继续排空即可
+                    retry_list = [code for code in progress.get("failed", [])
+                                  if not progress.get("submitted_flags", {}).get(code)]
+                    if retry_list:
+                        print(f"\n🔄 第二轮重试: {len(retry_list)} 道未解出题 ({', '.join(retry_list[:5])}...)")
+                        stats["retry_round"] = True
+                        retry_inflight = {}
+                        retry_idx = 0
+                        retry_failed = list(retry_list)
 
-            # P2-④ 两轮制重试（MoMo-agent 借鉴）：跑完一轮后，第二轮优先重试 failed 题
-            # 注意：必须在同一个 with 块内提交，否则 executor 已 shutdown，submit 直接报错
-            if not quota_exhausted:
-                retry_list = [code for code in progress.get("failed", [])
-                              if not progress.get("submitted_flags", {}).get(code)]
-                if retry_list:
-                    print(f"\n🔄 第二轮重试: {len(retry_list)} 道未解出题 ({', '.join(retry_list[:5])}...)")
-                    stats["retry_round"] = True
-                    retry_inflight = {}
-                    retry_idx = 0
-                    retry_failed = list(retry_list)
+                        def _retry_fill():
+                            nonlocal retry_idx
+                            while retry_idx < len(retry_failed) and len(retry_inflight) < MAX_INFLIGHT:
+                                left = time_left()
+                                if left < safety_margin:
+                                    print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min)，重试轮停止开新题")
+                                    break
+                                code = retry_failed[retry_idx]
+                                challenge = next((c for c in challenges if c.get("unique_code") == code), None)
+                                retry_idx += 1
+                                if not challenge:
+                                    continue
+                                print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
+                                f = ex.submit(solve_challenge, challenge, progress,
+                                              retry_hint=_build_deadend_hint(code), retry_round=True)
+                                retry_inflight[f] = challenge
+                            return retry_idx
 
-                    def _retry_fill():
-                        nonlocal retry_idx
-                        while retry_idx < len(retry_failed) and len(retry_inflight) < MAX_INFLIGHT:
-                            left = time_left()
-                            if left < safety_margin:
-                                print(f"\n⚠️ 剩余时间不足 ({left/60:.1f}min)，重试轮停止开新题")
-                                break
-                            code = retry_failed[retry_idx]
-                            challenge = next((c for c in challenges if c.get("unique_code") == code), None)
-                            retry_idx += 1
-                            if not challenge:
-                                continue
-                            print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
-                            f = ex.submit(solve_challenge, challenge, progress,
-                                          retry_hint=_build_deadend_hint(code), retry_round=True)
-                            retry_inflight[f] = challenge
-                        return retry_idx
-
-                    retry_idx = _retry_fill()
-                    while retry_inflight and not quota_exhausted:
-                        done, _ = wait(list(retry_inflight.keys()), return_when=FIRST_COMPLETED)
-                        for f in done:
-                            ch = retry_inflight.pop(f)
-                            if _collect(f, ch):
-                                quota_exhausted = True
-                        if not quota_exhausted:
-                            retry_idx = _retry_fill()
-                else:
-                    print("\n✅ 所有题目已解决，无需重试。")
+                        retry_idx = _retry_fill()
+                        while retry_inflight and not quota_exhausted:
+                            done, _ = wait(list(retry_inflight.keys()), return_when=FIRST_COMPLETED)
+                            for f in done:
+                                ch = retry_inflight.pop(f)
+                                if _collect(f, ch):
+                                    quota_exhausted = True
+                            if not quota_exhausted:
+                                retry_idx = _retry_fill()
+                    else:
+                        print("\n✅ 所有题目已解决，无需重试。")
+            except KeyboardInterrupt:
+                # 第一次 Ctrl+C：停止开新题 + 通知在途 agent 当前轮做完立即收尾
+                # （不 set 的话 with 退出的 shutdown(wait=True) 会干等线程跑完几百轮）
+                _RUN_STOP.set()
+                print("\n\n⚠️ 用户中断：已停止开新题，在途题将在当前轮结束后收尾（最多等一个 LLM 调用周期）…")
+                print("   （再次按 Ctrl+C = 立即强制退出）")
     except KeyboardInterrupt:
-        # with 块退出时 shutdown(wait=True) 会等在途题自行收尾（关容器/导出日志），随后继续汇总
-        print("\n\n⚠️ 用户中断，等待在途题收尾...")
+        # 第二次 Ctrl+C（打断了线程收尾等待）→ 强杀进程；容器尽力清理
+        print("\n⚠️ 强制退出")
+        try:
+            _close_all_active()
+        except Exception:
+            pass
+        os._exit(130)
     finally:
-        # 兜底：无论正常结束还是中断（含第二次 Ctrl+C 打断等待），都清掉登记中未关的容器
+        # 兜底：无论正常结束还是中断，都清掉登记中未关的容器
         _close_all_active()
 
     # 5. 汇总

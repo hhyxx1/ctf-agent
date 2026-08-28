@@ -378,6 +378,7 @@ def _maybe_spawn_parallel_child(agent: "Agent", task: str) -> str:
             child = build_agent(cat, direction=direction, challenge_id=ch_id)
             child._task_text = task_text
             child._solved_event = solved_event
+            child.global_stop = agent.global_stop  # 继承全局停止信号（Ctrl+C 时一起停）
             child.run(task_text, verbose=False,
                       max_iterations=config.PARALLEL_ROUNDS, stop_event=solved_event)
         except LLMQuotaExhausted:
@@ -434,6 +435,7 @@ class Agent:
         self._solved_event = None  # 多方向并行：任一方向提交正确 → set，其他方向提前停
         self._child_thread = None  # 多方向并行子 Agent 线程（run 结束时 join 收尾）
         self._task_text = ""  # 原始任务（多方向并行子 Agent 需要同一题目任务）
+        self.global_stop: threading.Event = None  # 全局停止信号（solver 在用户 Ctrl+C 时 set）
 
     def _compress_history(self, threshold: int = 40, keep_tail: int = 10, max_len: int = 400):
         """上下文压缩（P1a）：messages 超阈值时，把早期 tool 结果压缩为摘要。
@@ -708,6 +710,10 @@ class Agent:
         no_progress_rounds = 0  # 连续调工具但未找到 flag 的轮次（无进展检测）
         no_progress_advised = False  # 是否已注入过换思路提示
         while self.iteration < iter_limit:
+            # 全局停止信号（用户 Ctrl+C）：当前轮结束后立即收尾，不再继续解题
+            if self.global_stop is not None and self.global_stop.is_set():
+                print("  ⏹️ 收到全局停止信号，本 Agent 提前收尾")
+                break
             # 并行停止信号：其他方向已找到 flag → 本方向提前停止（省 token）
             if self._solved_event is not None and self._solved_event.is_set():
                 print("  ⏹️ 其他方向已找到 flag，本方向提前停止")
