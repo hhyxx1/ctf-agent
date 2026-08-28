@@ -102,17 +102,20 @@ class LLM:
 
     @staticmethod
     def _openai_base(url: str) -> str:
-        """确保 OpenAI 标准 base_url：非网关模式自动补 /v1（标准路径为 /v1/chat/completions）。
+        """确保 OpenAI 标准 base_url（SDK 会自动在 base 后拼 /chat/completions）。
 
-        aiii.doyo.icu 等 OpenAI 兼容端点只有 /v1/chat/completions 返回标准 JSON，
-        /chat/completions 返回 HTML 首页（导致响应解析成 str 崩溃）。
+        用户常把完整端点填进来（如 https://token.sensenova.cn/v1/chat/completions），
+        若原样给 SDK 会再拼一次 /chat/completions → 双重路径 404。
+        所以这里统一归一化：剥掉 /chat/completions 后缀；无 /v1 后缀则补 /v1。
         网关类 URL（slab llm-gateway / tsecbench .tsecbench.gw）不做处理。
         """
         if _is_gateway_url(url) or ".tsecbench.gw" in url:
             return url
         url = url.rstrip("/")
-        if not url.endswith("/chat/completions") and not url.endswith("/v1"):
-            return url + "/v1"
+        if url.endswith("/chat/completions"):
+            url = url[: -len("/chat/completions")].rstrip("/")
+        if not url.endswith("/v1"):
+            url = url + "/v1"
         return url
 
     def _chat_via_requests(self, payload: dict):
