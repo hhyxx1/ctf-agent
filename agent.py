@@ -707,6 +707,22 @@ class Agent:
 
         return "\n".join(results)
 
+    def _repair_message_chain(self):
+        """修补上次 LLM 中断留下的断裂对话尾部（assistant 带 tool_calls 但缺 tool 响应），
+        恢复协议一致性，使同一 Agent 可原地续跑而不丢历史上下文。"""
+        msgs = self.messages
+        if not msgs:
+            return
+        last = msgs[-1]
+        if last.get("role") == "assistant" and last.get("tool_calls"):
+            for tc in last["tool_calls"]:
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id"),
+                    "content": "[系统提示] 该工具调用因 LLM 网络中断未执行",
+                })
+            print("  🔧 已修补中断的对话链（历史上下文完整保留，原地续跑）")
+
     def run(self, task: str, verbose: bool = True, max_iterations: int = None,
             stop_event: threading.Event = None) -> dict:
         """
@@ -733,6 +749,9 @@ class Agent:
             task_with_kb = f"## 相关解题知识\n{knowledge}\n\n## 题目\n{task}"
         else:
             task_with_kb = task
+
+        # 可续跑：修补上次 run 因 LLM 中断留下的断裂尾部（原地续跑时历史完整保留）
+        self._repair_message_chain()
 
         self.messages.append({"role": "user", "content": task_with_kb})
 

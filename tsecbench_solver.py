@@ -548,11 +548,13 @@ Flag 数量: {flag_count}
         # 轮次上限统一用 MAX_ITERATIONS（500）：不按难度截断（easy 快题靠迹象提前停，难题跑满）
         _iter_limit = config.MAX_ITERATIONS
         # LLM 失败整题重试：快速失败（1-3 轮戛然而止）的 8 道题多为此因——限流/网络抖动
-        # 三连重试失败后旧逻辑直接标记 failed。现在等 90s 换个时机重跑一次（容器/已获信息作废重来）
+        # 三连重试失败后旧逻辑直接标记 failed。现在短等后原地续跑：同一个 Agent 不重建，
+        # 对话历史完整保留（agent.run 开头会修补中断留下的断裂 tool_calls 尾部），
+        # 几十轮的侦察成果不再因一次网络抖动作废。仅用剩余轮次预算。
+        agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
+        agent.global_stop = _RUN_STOP
         result = None
         for _llm_attempt in range(2):
-            agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
-            agent.global_stop = _RUN_STOP
             try:
                 result = agent.run(task, max_iterations=_iter_limit)
             except LLMQuotaExhausted as e:
@@ -576,9 +578,13 @@ Flag 数量: {flag_count}
                 }
             if not result.get("llm_error") or _llm_attempt == 1:
                 break
-            logger.warning(f"{unique_code} 因 LLM 失败中断（{result['llm_error'][:100]}），15s 后重建 Agent 重试")
-            print(f"  ⚠️ 本题因 LLM 调用失败中断，15s 后重建 Agent 重试一次…")
+            _remaining = max(0, _iter_limit - result.get("iterations", 0))
+            if _remaining <= 0:
+                break
+            logger.warning(f"{unique_code} 因 LLM 失败中断（{result['llm_error'][:100]}），15s 后原地续跑（剩余 {_remaining} 轮预算）")
+            print(f"  ⚠️ 本题因 LLM 调用失败中断，15s 后保留上下文原地续跑…")
             time.sleep(15)  # 提供商瞬断居多，短间隔快速重试即可
+            task = "（系统提示：刚才一次 LLM 调用因提供商网络中断而失败，你的历史进度都在，请从中断处继续解题）"
     except Exception as e:
         # LLMQuotaExhausted 已在内部处理（raise 穿透），这里兜其他意外
         logger.error(f"❌ {unique_code} 解题流程异常: {e}")
