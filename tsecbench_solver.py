@@ -530,18 +530,28 @@ Flag 数量: {flag_count}
 
     # 3. Agent 解题（按题型分派子 Agent：专用 prompt + 工具子集 + 经验注入）
     print(f"\n[2/5] Agent 解题...")
-    # T2-⑧ 动态预算：easy 紧止损（快速放弃换题），hard 松止损（多给机会）
+    # T2-⑧ 两遍制预算（覆盖优先）：平台按总时限计分，63 题必须全部至少扫一遍。
+    # 数据支撑：solved 轮数中位 ~12、40+ 轮仅 1 道翻盘 → 首轮快扫紧凑止损，
+    # 没扫出的题留给重试轮深挖（retry_round 大预算），单题久磨=牺牲没轮到的题
     _d = (diff or "").lower()
-    if "easy" in _d:
-        budget = {"no_progress_hint": 30, "no_progress_giveup": 8}
-    elif "medium" in _d or "med" in _d:
-        budget = {"no_progress_hint": 45, "no_progress_giveup": 12}
+    if retry_round:
+        # 第二遍深挖：首轮快扫没解出的题，二刷值得多给机会
+        if "easy" in _d:
+            budget = {"no_progress_hint": 25, "no_progress_giveup": 10}
+        elif "medium" in _d or "med" in _d:
+            budget = {"no_progress_hint": 35, "no_progress_giveup": 14}
+        else:
+            budget = {"no_progress_hint": 45, "no_progress_giveup": 20}
     else:
-        budget = {"no_progress_hint": 55, "no_progress_giveup": 18}
+        # 第一遍快扫：紧凑止损
+        if "easy" in _d:
+            budget = {"no_progress_hint": 12, "no_progress_giveup": 5}
+        elif "medium" in _d or "med" in _d:
+            budget = {"no_progress_hint": 18, "no_progress_giveup": 7}
+        else:
+            budget = {"no_progress_hint": 25, "no_progress_giveup": 10}
     # T1-② 重试轮温度提升：强制方向多样性，避免和首轮一模一样的二刷
     temp = min(1.0, config.LLM_TEMPERATURE + 0.25) if retry_round else None
-    agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
-    agent.global_stop = _RUN_STOP  # Ctrl+C 时让 agent 当前轮做完就收尾（不等几百轮跑完）
     # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
     # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
@@ -579,11 +589,15 @@ Flag 数量: {flag_count}
             if not result.get("llm_error") or _llm_attempt == 1:
                 break
             _remaining = max(0, _iter_limit - result.get("iterations", 0))
-            if _remaining <= 0:
+            if _remaining <= 0 or _RUN_STOP.is_set():
                 break
             logger.warning(f"{unique_code} 因 LLM 失败中断（{result['llm_error'][:100]}），15s 后原地续跑（剩余 {_remaining} 轮预算）")
             print(f"  ⚠️ 本题因 LLM 调用失败中断，15s 后保留上下文原地续跑…")
-            time.sleep(15)  # 提供商瞬断居多，短间隔快速重试即可
+            # sleep 切片：Ctrl+C 后 0.5s 内中止续跑等待
+            for _ in range(30):
+                if _RUN_STOP.is_set():
+                    break
+                time.sleep(0.5)
             task = "（系统提示：刚才一次 LLM 调用因提供商网络中断而失败，你的历史进度都在，请从中断处继续解题）"
     except Exception as e:
         # LLMQuotaExhausted 已在内部处理（raise 穿透），这里兜其他意外

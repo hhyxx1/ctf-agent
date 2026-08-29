@@ -518,7 +518,9 @@ class Agent:
         """调用 LLM，处理 tool_calls"""
         import time as _time
         _t0 = _time.time()
-        response = llm.chat(self.messages, tools=self.tools, temperature=self.llm_temperature)
+        # 传入全局停止信号：Ctrl+C 后 LLM 重试退避 0.5s 内可被打断（否则单次退避最长等 300s）
+        response = llm.chat(self.messages, tools=self.tools, temperature=self.llm_temperature,
+                            stop_event=self.global_stop)
         _llm_elapsed = round(_time.time() - _t0, 2)
         choice = response.choices[0]
         msg = choice.message

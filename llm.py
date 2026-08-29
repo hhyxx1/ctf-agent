@@ -148,8 +148,9 @@ class LLM:
         message = SimpleNamespace(content=msg.get("content") or "", tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
-    def chat(self, messages, tools=None, tool_choice="auto", temperature=None):
-        """调用大模型，支持 function calling（temperature 传入则覆盖全局配置，重试轮多样性用）"""
+    def chat(self, messages, tools=None, tool_choice="auto", temperature=None, stop_event=None):
+        """调用大模型，支持 function calling（temperature 传入则覆盖全局配置，重试轮多样性用）
+        stop_event: 全局停止信号（Ctrl+C），重试等待期间可被打断，不再死等退避计时"""
         kwargs = {
             "model": config.LLM_MODEL,
             "messages": messages,
@@ -163,6 +164,9 @@ class LLM:
 
         last_err = None
         for attempt in range(self.max_retries):
+            # 停止信号（Ctrl+C）：调用前和退避等待中都检查，收到后立即放弃本调用
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("LLM 调用被停止信号中断（用户 Ctrl+C）")
             try:
                 if self.gateway_mode:
                     resp = self._chat_via_requests(kwargs)
@@ -196,7 +200,12 @@ class LLM:
                     wait = max(wait, 30.0)
                 wait = min(wait, 300)  # 单次最长等 5min，避免卡死整轮
                 logger.warning(f"LLM 调用失败 ({_classify_error(e)}, attempt {attempt+1}/{self.max_retries}): {e}, {wait:.1f}s 后重试")
-                time.sleep(wait)
+                # 退避等待切片化：每 0.5s 检查一次停止信号，Ctrl+C 到来立即中止，不再死等
+                deadline = time.time() + wait
+                while time.time() < deadline:
+                    if stop_event is not None and stop_event.is_set():
+                        raise RuntimeError("LLM 调用被停止信号中断（用户 Ctrl+C）")
+                    time.sleep(min(0.5, max(0.05, deadline - time.time())))
         raise RuntimeError(f"LLM 调用失败，已重试 {self.max_retries} 次: {last_err}")
 
 
