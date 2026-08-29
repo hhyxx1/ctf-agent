@@ -576,9 +576,9 @@ Flag 数量: {flag_count}
                 }
             if not result.get("llm_error") or _llm_attempt == 1:
                 break
-            logger.warning(f"{unique_code} 因 LLM 失败中断（{result['llm_error'][:100]}），90s 后重建 Agent 重试")
-            print(f"  ⚠️ 本题因 LLM 调用失败中断，90s 后重建 Agent 重试一次…")
-            time.sleep(90)
+            logger.warning(f"{unique_code} 因 LLM 失败中断（{result['llm_error'][:100]}），15s 后重建 Agent 重试")
+            print(f"  ⚠️ 本题因 LLM 调用失败中断，15s 后重建 Agent 重试一次…")
+            time.sleep(15)  # 提供商瞬断居多，短间隔快速重试即可
     except Exception as e:
         # LLMQuotaExhausted 已在内部处理（raise 穿透），这里兜其他意外
         logger.error(f"❌ {unique_code} 解题流程异常: {e}")
@@ -790,16 +790,16 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
     _llm_fail_streak = [0]  # 连续"LLM 全失败"题数（熔断用，20260829 凌晨 42 题烧在服务不可用上的教训）
 
     def _llm_health_check() -> bool:
-        """熔断：连续 3+ 题 LLM 全失败 → 暂停开新题，每 60s 探测服务，恢复后继续。
+        """熔断：连续 3+ 题 LLM 全失败 → 暂停开新题，每 10s 探测（提供商瞬断恢复快，
+        不做长等待——20260829 那种间歇抖动场景下 60s 间隔太浪费）。
         返回 False 表示等待期间时间预算耗尽。"""
         from llm import llm as _llm
-        print(f"\n🚨 已连续 {_llm_fail_streak[0]} 道题 LLM 全失败（疑似 LLM 服务不可用），熔断暂停开新题")
+        print(f"\n🚨 已连续 {_llm_fail_streak[0]} 道题 LLM 全失败（疑似 LLM 服务抖动），暂停开新题")
         while _llm_fail_streak[0] >= 3:
             if time_left() < safety_margin:
                 print("⚠️ 熔断等待期间时间预算耗尽")
                 return False
-            print(f"  ⏳ 60s 后健康检查（剩余 {time_left()/60:.0f}min）…")
-            time.sleep(60)
+            time.sleep(10)
             _orig_retries = _llm.max_retries
             try:
                 _llm.max_retries = 1
@@ -808,7 +808,7 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                 print("  ✅ LLM 服务恢复，继续解题")
                 return True
             except Exception as e:
-                print(f"  ❌ 仍不可用: {str(e)[:100]}")
+                print(f"  ❌ LLM 仍不可用: {str(e)[:100]}（10s 后再试）")
             finally:
                 _llm.max_retries = _orig_retries
         return True
