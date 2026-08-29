@@ -325,6 +325,71 @@ def qr_decode(image_path: str) -> str:
             "用 run_python + PIL 处理后重试；或安装 zbarimg (sudo apt install zbar-tools)。")
 
 
+# ── 4b. ocr_recognize：图片文字/验证码识别（b-03 类验证码题的缺口） ────────────
+
+@register_tool(
+    "ocr_recognize",
+    "识别图片中的文字（验证码、截图里的 flag/密码、扫描件）。支持放大预处理"
+    "（低分辨率验证码建议 scale=3 提高识别率）。需要 tesseract（未装时给出安装命令）。",
+    {
+        "type": "object",
+        "properties": {
+            "image_path": {"type": "string", "description": "图片路径"},
+            "scale": {"type": "integer", "description": "放大倍数（验证码/小字建议 3，默认 1）"},
+            "whitelist": {"type": "string", "description": "可选：限定字符集，如验证码用 '0123456789abcdefghijklmnopqrstuvwxyz'"},
+        },
+        "required": ["image_path"],
+    },
+)
+def ocr_recognize(image_path: str, scale: int = 1, whitelist: str = "") -> str:
+    image_path = (image_path or "").strip()
+    if not os.path.isfile(image_path):
+        return f"[参数错误] 文件不存在: {image_path}"
+    tess = _which("tesseract")
+    if not tess:
+        return ("[工具未安装] tesseract 不在，OCR 无法进行（sudo apt install -y tesseract-ocr）。\n"
+                "[替代] run_python + PIL 手写验证码识别；或先分析该验证码是否只是干扰项，"
+                "转向其他攻击面。")
+    cache_key = f"ocr:{image_path}:{scale}:{whitelist}"
+    cached = check_exec_cache(cache_key)
+    if cached:
+        return cached
+
+    work = image_path
+    pre = ""
+    try:
+        if scale and scale > 1:
+            from PIL import Image
+            img = Image.open(image_path).convert("L")  # 灰度
+            img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
+            work = f"/tmp/ocr_{os.getpid()}_{os.path.basename(image_path)}"
+            img.save(work)
+            pre = f"[预处理] 灰度 x{scale} 放大 → {work}\n"
+    except Exception:
+        work = image_path  # PIL 不可用/失败则直接原样 OCR
+
+    cmd = [tess, work, "stdout"]
+    if whitelist:
+        cmd += ["-c", f"tessedit_char_whitelist={whitelist}"]
+    out = run_cmd(cmd, timeout=60)
+    if work != image_path:
+        try:
+            os.remove(work)
+        except OSError:
+            pass
+    text = out.strip()
+    if not text or text == "[无输出]":
+        result = (pre + "[OCR 空结果] 未识别出文字。\n[下一步] 换 scale（2~4）、加 whitelist "
+                  "限定字符集，或用 run_python + PIL 增强对比度/二值化后重试。")
+    else:
+        footer = _flags_footer(text)
+        result = (pre + f"[OCR 结果]\n{_truncate(text, 1500)}"
+                  + (footer if footer else "\n[下一步] 内容像验证码→带 cookie 回填表单重放；"
+                     "像密码/编码→直接使用或 auto_decode。"))
+    store_exec_cache(cache_key, result)
+    return result
+
+
 # ── 5. pdf_office_analyze：PDF/Office 文档取证 ──────────────────────────────
 
 @register_tool(

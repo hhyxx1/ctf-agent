@@ -26,6 +26,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import Dict, List
 
+# 主线程预热 pwntools：pwnlib import 时注册 signal handler，worker 线程里首次
+# import pwn 会抛 "signal only works in main thread"（f 系 pwn 题 run_python
+# import pwn 必炸的隐藏元凶）。主线程先导入后，子线程命中 sys.modules 缓存不再执行模块级代码。
+try:
+    import pwn  # noqa: F401
+except Exception as _e:  # 环境没装也不影响其他题型
+    print(f"[预热] pwntools 导入失败（pwn 类题将受影响）: {_e}")
+
 from agent import build_agent
 from llm import LLMQuotaExhausted
 from slab_match_solver import _load_lessons, _save_lessons
@@ -539,25 +547,46 @@ Flag 数量: {flag_count}
     try:
         # 轮次上限统一用 MAX_ITERATIONS（500）：不按难度截断（easy 快题靠迹象提前停，难题跑满）
         _iter_limit = config.MAX_ITERATIONS
-        result = agent.run(task, max_iterations=_iter_limit)
-    except LLMQuotaExhausted as e:
-        # 配额/5小时计费窗口耗尽：重试无意义，整轮应终止。关闭容器、导出日志后上抛，
-        # 由 run_tsecbench 捕获并优雅收尾（而不是把每道题都跑成"失败"继续烧容器）。
-        logger.error(f"❌ LLM 配额已耗尽，终止本轮: {e}")
-        _safe_close(unique_code)
-        _update_progress(progress, lambda p: p["failed"].append(unique_code))
-        _export_challenge_log(unique_code, diff, flag_count, {
-            "success": False, "flag_found": False, "iterations": agent.iteration,
-            "final_message": f"[LLM 配额耗尽: {e}]", "run_log": agent._run_log,
-        }, agent, task, "quota_exhausted", [], [], container_addrs, _challenge_start)
-        raise
+        # LLM 失败整题重试：快速失败（1-3 轮戛然而止）的 8 道题多为此因——限流/网络抖动
+        # 三连重试失败后旧逻辑直接标记 failed。现在等 90s 换个时机重跑一次（容器/已获信息作废重来）
+        result = None
+        for _llm_attempt in range(2):
+            agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
+            agent.global_stop = _RUN_STOP
+            try:
+                result = agent.run(task, max_iterations=_iter_limit)
+            except LLMQuotaExhausted as e:
+                # 配额/5小时计费窗口耗尽：重试无意义，整轮应终止。关闭容器、导出日志后上抛，
+                # 由 run_tsecbench 捕获并优雅收尾（而不是把每道题都跑成"失败"继续烧容器）。
+                logger.error(f"❌ LLM 配额已耗尽，终止本轮: {e}")
+                _safe_close(unique_code)
+                _update_progress(progress, lambda p: p["failed"].append(unique_code))
+                _export_challenge_log(unique_code, diff, flag_count, {
+                    "success": False, "flag_found": False, "iterations": agent.iteration,
+                    "final_message": f"[LLM 配额耗尽: {e}]", "run_log": agent._run_log,
+                }, agent, task, "quota_exhausted", [], [], container_addrs, _challenge_start)
+                raise
+            except Exception as e:
+                logger.error(f"❌ {unique_code} 解题异常: {e}")
+                result = {
+                    "success": False,
+                    "flag_found": False,
+                    "iterations": agent.iteration,
+                    "final_message": f"[解题异常: {e}]",
+                }
+            if not result.get("llm_error") or _llm_attempt == 1:
+                break
+            logger.warning(f"{unique_code} 因 LLM 失败中断（{result['llm_error'][:100]}），90s 后重建 Agent 重试")
+            print(f"  ⚠️ 本题因 LLM 调用失败中断，90s 后重建 Agent 重试一次…")
+            time.sleep(90)
     except Exception as e:
-        logger.error(f"❌ {unique_code} 解题异常: {e}")
-        result = {
+        # LLMQuotaExhausted 已在内部处理（raise 穿透），这里兜其他意外
+        logger.error(f"❌ {unique_code} 解题流程异常: {e}")
+        result = result or {
             "success": False,
             "flag_found": False,
-            "iterations": agent.iteration,
-            "final_message": f"[解题异常: {e}]",
+            "iterations": getattr(agent, "iteration", 0),
+            "final_message": f"[解题流程异常: {e}]",
         }
 
     agent_success = result.get("success", False)

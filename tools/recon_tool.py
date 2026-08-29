@@ -386,6 +386,11 @@ def env_selfcheck() -> str:
             __import__(m)
         except ImportError:
             mod_missing.append(m)
+        except ValueError as e:
+            # pwntools import 时注册 signal handler，非主线程会抛
+            # "signal only works in main thread"——库本身在位，不算缺失
+            # （d-03 就死在这里：env_selfcheck 被并发 worker 线程调用）
+            print(f"[env_selfcheck] {m} 在子线程无法 import（signal 限制），视为可用: {e}")
 
     lines = [f"[OK] 可用工具 ({len(ok)}): {' '.join(ok)}"]
     if missing:

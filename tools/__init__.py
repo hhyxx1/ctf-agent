@@ -48,7 +48,7 @@ __all__ = [
     # Crypto
     "rsa_decrypt", "auto_decode", "encode_data",
     # Forensics
-    "analyze_file", "steg_check",
+    "analyze_file", "steg_check", "ocr_recognize",
     # Web
     "http_request", "sqli_scan", "dir_scan",
     # Pentest

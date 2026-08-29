@@ -573,10 +573,42 @@ class Agent:
         for tc in msg.tool_calls:
             name = tc.function.name
             _t_tool0 = _time.time()
+            # JSON 解析失败先尝试宽松恢复（ast 兼容单引号/尾逗号——模型写长代码时转义常出错）；
+            # 仍失败则不执行工具，把原文片段回显给模型（c-04/b-01 死因：静默置 {} 让模型
+            # 一直看到"missing arguments"却不知道自己的 JSON 坏了，死循环到预算烧完）
+            raw_args = tc.function.arguments or ""
+            args = None
             try:
-                args = json.loads(tc.function.arguments)
+                args = json.loads(raw_args)
             except json.JSONDecodeError:
-                args = {}
+                try:
+                    import ast
+                    args = ast.literal_eval(raw_args)
+                    if not isinstance(args, dict):
+                        args = None
+                except Exception:
+                    args = None
+            if args is None:
+                result_str = (
+                    "[参数解析失败] 你这次 tool_call 的 arguments 不是有效 JSON，工具没有执行。"
+                    f"原始内容（前 400 字符）：{raw_args[:400]!r}\n"
+                    "常见原因：代码/文本里的引号或换行没有正确 JSON 转义。"
+                    "请修正转义（或改用 run_shell heredoc 写文件）后重新调用。"
+                )
+                self._run_log and self._run_log[-1]["tool_calls"].append({
+                    "name": name, "arguments": {}, "elapsed_sec": 0,
+                    "result_preview": result_str[:1500], "result_full_len": len(result_str),
+                    "args_parse_failed": True,
+                })
+                # 必须补上 tool 消息（OpenAI 协议：每个 tool_call_id 需有对应响应，否则下次调用 400）
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_str,
+                })
+                results.append(result_str)
+                logger.warning(f"[轮次 {self.iteration}] {name} arguments JSON 无效，已回显原文")
+                continue
 
             logger.info(f"[轮次 {self.iteration}] 调用 {name}({args})")
             print(f"  🔧 {name}({json.dumps(args, ensure_ascii=False)[:200]})")
@@ -611,7 +643,10 @@ class Agent:
             # 仅当 submit_flag 返回「提交成功」（真提交到平台）才视为完成；
             # 返回「本地模式/失败」时不要设 submitted，让 Agent 继续解题
             if name == "submit_flag":
-                if "提交成功" in result_str or "correct" in str(result_str).lower():
+                # 判定与自动提交钩子一致：「提交成功」只代表平台收到，必须 correct_flag_count>0
+                # 才算真对（平台对垃圾输入也回提交成功，误置 found_flag 会让止损失效）
+                _mc_ok = re.search(r'"correct_flag_count":\s*(\d+)', result_str)
+                if "提交成功" in result_str and _mc_ok is not None and int(_mc_ok.group(1)) > 0:
                     self.found_flag = True
                     if self._solved_event:
                         self._solved_event.set()
@@ -690,6 +725,7 @@ class Agent:
         iter_limit = max_iterations or config.MAX_ITERATIONS
         # 多方向并行基础设施：任一方向提交正确 → 事件置位 → 其他方向提前停
         self._solved_event = stop_event if stop_event is not None else threading.Event()
+        self._llm_error = None  # 本次 run 中 LLM 调用失败的原因（None=无失败）
         self._task_text = task  # 并行子 Agent 需要同一题目任务
         # 解题前先检索相关知识
         knowledge = search_knowledge(task)
@@ -760,6 +796,13 @@ class Agent:
             except Exception as e:
                 logger.error(f"LLM 调用失败: {e}")
                 print(f"  ❌ LLM 调用失败: {e}")
+                # 记录失败事件（之前是盲点：快速失败的题日志里查不到任何 LLM 错误）
+                self._llm_error = str(e)
+                if self._run_log:
+                    self._run_log.append({
+                        "round": self.iteration, "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "event": "llm_error", "error": str(e)[:500],
+                    })
                 break
 
             # 如果 Agent 返回的是纯文本（没有调用工具），可能是结束或需要继续
@@ -811,6 +854,8 @@ class Agent:
             "success": self.submitted,
             "flag_found": self.found_flag,
             "iterations": self.iteration,
+            # LLM 调用失败导致中断（区别于"正常解题失败"——solver 据此做整题重试）
+            "llm_error": getattr(self, "_llm_error", None),
             # 取最后一条 assistant 消息（循环以失败/提交 break 时 messages[-1] 是 tool 结果，
             # 直接取会把工具原始输出当"解题方向"存进经验库，污染后续题）
             "final_message": next(

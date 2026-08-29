@@ -120,6 +120,7 @@ def run_cmd(cmd, timeout=120):
     try:
         r = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
+            errors="replace",  # 二进制输出（gzip/ELF/图片）不再炸 utf-8 decode（c-03/c-06 死因）
             shell=isinstance(cmd, str),
             start_new_session=True,  # 独立进程组，超时可整组强杀
         )
@@ -156,12 +157,23 @@ def register_tool(name, description, parameters):
 # ── 结果缓存去重：防止 Agent 重复探测同一目标浪费轮次（日志实测同一命令反复执行 10+ 次）──
 _EXEC_CACHE = {}
 _EXEC_CACHE_MAX = 300
+_EXEC_CACHE_HITS: dict = {}  # key → 命中次数（重复操作升级警告用）
 
 
 def check_exec_cache(key: str):
-    """查询执行缓存，命中返回缓存结果（已附加重复提示），未命中返回 None"""
+    """查询执行缓存，命中返回缓存结果（按重复次数升级警告），未命中返回 None。
+
+    e3-04 教训：仅提示"换个方向"没用——agent 连续 75 轮重复同一 probe。
+    第 2 次命中强警告；第 3 次起明确告知将不再返回结果，必须换方法。
+    """
     if key in _EXEC_CACHE:
-        return f"[缓存命中] 此操作此前已执行过，结果与之前相同：\n{_EXEC_CACHE[key]}\n建议不要重复探测，换个方向。"
+        _EXEC_CACHE_HITS[key] = _EXEC_CACHE_HITS.get(key, 1) + 1
+        n = _EXEC_CACHE_HITS[key]
+        if n == 2:
+            return (f"[缓存命中-第2次重复] 此操作已执行过，结果完全相同：\n{_EXEC_CACHE[key]}\n"
+                    "不要重复相同操作。改变 URL/参数/方法，或转向其他攻击面。")
+        return (f"[重复操作-第{n}次] 该操作已执行 {n} 次，结果不会再变：\n{_EXEC_CACHE[key][:500]}\n"
+                "【系统拒绝重复响应】立即换一种探测方式或攻击面，否则本轮不会获得任何新信息。")
     return None
 
 
@@ -194,7 +206,8 @@ CATEGORY_TOOLS = {
 COMMON_TOOLS = ["run_shell", "read_file", "write_file", "http_request", "run_python",
                 "list_dir", "analyze_file", "extract_flag", "submit_flag",
                 "check_conn", "wordlist", "full_recon", "env_selfcheck", "searchsploit_query",
-                "shell_open", "shell_send", "shell_read", "shell_close", "shell_list"]
+                "shell_open", "shell_send", "shell_read", "shell_close", "shell_list",
+                "ocr_recognize"]
 
 
 def get_tools_schema(category: str = ""):
