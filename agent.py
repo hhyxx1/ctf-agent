@@ -410,7 +410,8 @@ def build_agent(category: str = "", direction: str = "", **kwargs):
 
 class Agent:
     def __init__(self, system_prompt: str = SYSTEM_PROMPT, category: str = "", direction: str = "",
-                 challenge_id: str = "", temperature: float = None, budget: dict = None):
+                 challenge_id: str = "", temperature: float = None, budget: dict = None,
+                 llm_model: str = None):
         # KV Cache 友好：system prompt 必须是静态常量，工具注册也静态生成（勿动态注入时间/状态）。
         # 动态信息（时间戳/变色内容）只能作为新消息 append 到 messages 末尾，绝不改 system prompt。
         self.messages: List[Dict] = [{"role": "system", "content": system_prompt}]
@@ -421,6 +422,7 @@ class Agent:
         self.category = category  # 题型（换思路提示按题型给攻击面方向用）
         self.challenge_id = challenge_id  # 自动提交 flag 用（平台提交 API 需要 unique_code）
         self.llm_temperature = temperature  # None→全局配置；重试轮传更高温强制方向多样性
+        self.llm_model = llm_model  # None→全局配置；重试轮可传旗舰模型攻坚（分级用模型）
         # 动态预算（按难度）：无迹象提示轮数 / 提示后止损轮数（easy 紧、hard 松）
         self.budget = {"no_progress_hint": 50, "no_progress_giveup": 15}
         if budget:
@@ -520,7 +522,7 @@ class Agent:
         _t0 = _time.time()
         # 传入全局停止信号：Ctrl+C 后 LLM 重试退避 0.5s 内可被打断（否则单次退避最长等 300s）
         response = llm.chat(self.messages, tools=self.tools, temperature=self.llm_temperature,
-                            stop_event=self.global_stop)
+                            stop_event=self.global_stop, model=self.llm_model)
         _llm_elapsed = round(_time.time() - _t0, 2)
         choice = response.choices[0]
         msg = choice.message

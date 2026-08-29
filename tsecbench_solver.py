@@ -552,6 +552,10 @@ Flag 数量: {flag_count}
             budget = {"no_progress_hint": 25, "no_progress_giveup": 10}
     # T1-② 重试轮温度提升：强制方向多样性，避免和首轮一模一样的二刷
     temp = min(1.0, config.LLM_TEMPERATURE + 0.25) if retry_round else None
+    # 分级用模型：重试轮深挖切旗舰（LLM_HEAVY_MODEL，如 glm-5.2），首扫保持 LLM_MODEL 走量。
+    # 旗舰慢且耗额度，只花在两遍制第二遍的 ~30 道硬骨头上
+    _heavy = (config.LLM_HEAVY_MODEL or "").strip()
+    _llm_model = _heavy if (retry_round and _heavy) else None
     # 单题超时兜底：两题并行（线程池）下 signal 仅主线程可用——去掉 signal.alarm，
     # 卡题由 agent 层兜底（MAX_ITERATIONS=50 + 无迹象 50 轮提示 + 提示后 15 轮止损）
     try:
@@ -561,7 +565,8 @@ Flag 数量: {flag_count}
         # 三连重试失败后旧逻辑直接标记 failed。现在短等后原地续跑：同一个 Agent 不重建，
         # 对话历史完整保留（agent.run 开头会修补中断留下的断裂 tool_calls 尾部），
         # 几十轮的侦察成果不再因一次网络抖动作废。仅用剩余轮次预算。
-        agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget)
+        agent = build_agent(cat, challenge_id=unique_code, temperature=temp, budget=budget,
+                            llm_model=_llm_model)
         agent.global_stop = _RUN_STOP
         result = None
         for _llm_attempt in range(2):

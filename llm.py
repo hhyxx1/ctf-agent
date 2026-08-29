@@ -148,11 +148,13 @@ class LLM:
         message = SimpleNamespace(content=msg.get("content") or "", tool_calls=tool_calls)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
-    def chat(self, messages, tools=None, tool_choice="auto", temperature=None, stop_event=None):
+    def chat(self, messages, tools=None, tool_choice="auto", temperature=None, stop_event=None,
+             model=None):
         """调用大模型，支持 function calling（temperature 传入则覆盖全局配置，重试轮多样性用）
-        stop_event: 全局停止信号（Ctrl+C），重试等待期间可被打断，不再死等退避计时"""
+        stop_event: 全局停止信号（Ctrl+C），重试等待期间可被打断，不再死等退避计时
+        model: 覆盖全局 LLM_MODEL（分级用模型：首扫用 flash 走量，重试轮深挖用旗舰攻坚）"""
         kwargs = {
-            "model": config.LLM_MODEL,
+            "model": model or config.LLM_MODEL,
             "messages": messages,
             "max_tokens": config.LLM_MAX_TOKENS,
             "temperature": config.LLM_TEMPERATURE if temperature is None else temperature,
