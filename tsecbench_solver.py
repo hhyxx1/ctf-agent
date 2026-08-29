@@ -735,6 +735,8 @@ Flag 数量: {flag_count}
         "code": unique_code,
         "flags_found": len(found_flags),
         "submit_results": submit_results,
+        # LLM 失败中断标记（熔断统计用：llm_error 非空 = 这道题死于 LLM 服务不可用而非解题失败）
+        "llm_error": result.get("llm_error"),
     }
 
 
@@ -785,12 +787,42 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
     inflight = {}
     idx = 0
     quota_exhausted = False  # LLM 配额耗尽 → 不再开新题/重试，等在途题收尾后直接汇总
+    _llm_fail_streak = [0]  # 连续"LLM 全失败"题数（熔断用，20260829 凌晨 42 题烧在服务不可用上的教训）
+
+    def _llm_health_check() -> bool:
+        """熔断：连续 3+ 题 LLM 全失败 → 暂停开新题，每 60s 探测服务，恢复后继续。
+        返回 False 表示等待期间时间预算耗尽。"""
+        from llm import llm as _llm
+        print(f"\n🚨 已连续 {_llm_fail_streak[0]} 道题 LLM 全失败（疑似 LLM 服务不可用），熔断暂停开新题")
+        while _llm_fail_streak[0] >= 3:
+            if time_left() < safety_margin:
+                print("⚠️ 熔断等待期间时间预算耗尽")
+                return False
+            print(f"  ⏳ 60s 后健康检查（剩余 {time_left()/60:.0f}min）…")
+            time.sleep(60)
+            _orig_retries = _llm.max_retries
+            try:
+                _llm.max_retries = 1
+                _llm.chat([{"role": "user", "content": "只回复 ok"}])
+                _llm_fail_streak[0] = 0
+                print("  ✅ LLM 服务恢复，继续解题")
+                return True
+            except Exception as e:
+                print(f"  ❌ 仍不可用: {str(e)[:100]}")
+            finally:
+                _llm.max_retries = _orig_retries
+        return True
 
     def _collect(f, ch):
         """收取一个完成 future 的结果；LLM 配额耗尽返回 True（终止整轮信号）"""
         try:
             result = f.result()
             stats[result["status"]] = stats.get(result["status"], 0) + 1
+            # 熔断统计：LLM 全失败的题 vs 正常题（正常解题失败会重置计数）
+            if result.get("llm_error"):
+                _llm_fail_streak[0] += 1
+            else:
+                _llm_fail_streak[0] = 0
         except LLMQuotaExhausted:
             print(f"\n❌ LLM 配额已耗尽，终止本轮（{ch.get('unique_code')} 收尾完成）")
             stats["failed"] = stats.get("failed", 0) + 1
@@ -800,6 +832,7 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
         except Exception as e:
             logger.error(f"❌ 题目 {ch.get('unique_code')} 出错: {e}", exc_info=True)
             stats["failed"] = stats.get("failed", 0) + 1
+            _llm_fail_streak[0] = 0
         return False
 
     def _fill_slots(ex, inflight, idx):
@@ -829,7 +862,10 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                         if _collect(f, ch):
                             quota_exhausted = True
                     if not quota_exhausted:
-                        idx = _fill_slots(ex, inflight, idx)
+                        if _llm_fail_streak[0] >= 3 and not _llm_health_check():
+                            quota_exhausted = True  # 等到时间耗尽，按收尾处理
+                        else:
+                            idx = _fill_slots(ex, inflight, idx)
                     # 配额耗尽时不再补槽：剩余在途题的 agent 会在下次 LLM 调用时同样抛出
                     # LLMQuotaExhausted 并自行关闭容器/导出日志，循环继续排空即可
 
