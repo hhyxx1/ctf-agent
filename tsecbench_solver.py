@@ -117,8 +117,11 @@ def _dump_json(obj, path: str) -> None:
 def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
                           result: Dict, agent, task: str, status: str,
                           found_flags: List[str], submit_results: List[Dict],
-                          container_addrs: List[str], start_ts: float) -> str:
-    """把单题 agent 全过程（输入/输出/工具调用/token/耗时）导出为一份 JSON。"""
+                          container_addrs: List[str], start_ts: float,
+                          attempt: int = 1) -> str:
+    """把单题 agent 全过程（输入/输出/工具调用/token/耗时）导出为一份 JSON。
+    文件名带尝试序号（code_t1.json / code_t2.json）：重试不再覆盖首扫日志——
+    上一轮 27 道 failed 的首扫细节全被重试覆盖丢失，复盘成了瞎子摸象（log_20260829_170309）。"""
     os.makedirs(TB_LOG_DIR, exist_ok=True)
 
     run_log = result.get("run_log", []) or []
@@ -175,7 +178,7 @@ def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
         "messages": truncated_messages,
     }
 
-    path = os.path.join(TB_LOG_DIR, f"{_safe_name(unique_code)}.json")
+    path = os.path.join(TB_LOG_DIR, f"{_safe_name(unique_code)}_t{attempt}.json")
     try:
         _dump_json(log, path)
     except Exception as e:
@@ -201,8 +204,8 @@ def _export_challenge_log(unique_code: str, diff: str, flag_count: int,
                     manifest = json.load(f)
                 if not isinstance(manifest, list):
                     manifest = []
-            # 按题去重：重试/重跑同题时覆盖旧条目，只保留最终结果
-            manifest = [m for m in manifest if m.get("unique_code") != unique_code]
+            # 保留所有尝试条目（t1/t2 各一行）：复盘需要首扫与重试的对比数据，
+            # 之前按题去重导致首扫失败细节无法回溯
             manifest.append(entry)
             _dump_json(manifest, TB_LOG_MANIFEST)
     except Exception:
@@ -219,10 +222,13 @@ def export_run_summary(progress: Dict, start_time: float) -> str:
     solved = [h["unique_code"] for h in history if h.get("status") == "solved"]
     failed = [h["unique_code"] for h in history if h.get("status") == "failed"]
 
-    # 从单题日志回读 token/耗时统计
+    # 从单题日志回读 token/耗时统计（history 每次尝试一条，日志按尝试编号 _t{n} 落盘）
     rows = []
+    _code_seen = {}
     for h in history:
         code = h.get("unique_code", "")
+        _code_seen[code] = _code_seen.get(code, 0) + 1
+        attempt = _code_seen[code]
         row = {
             "unique_code": code,
             "status": h.get("status"),
@@ -232,7 +238,9 @@ def export_run_summary(progress: Dict, start_time: float) -> str:
             "flags_submitted": h.get("flags_submitted", 0),
             "timestamp": h.get("timestamp", ""),
         }
-        log_path = os.path.join(TB_LOG_DIR, f"{_safe_name(code)}.json")
+        log_path = os.path.join(TB_LOG_DIR, f"{_safe_name(code)}_t{attempt}.json")
+        if not os.path.exists(log_path):
+            log_path = os.path.join(TB_LOG_DIR, f"{_safe_name(code)}.json")  # 兼容旧命名
         if os.path.exists(log_path):
             try:
                 with open(log_path, "r", encoding="utf-8") as f:
@@ -404,7 +412,8 @@ def _build_deadend_hint(code: str) -> str:
     return "\n".join(lines)
 
 
-def solve_challenge(challenge: Dict, progress: Dict, retry_hint: str = "", retry_round: bool = False) -> Dict:
+def solve_challenge(challenge: Dict, progress: Dict, retry_hint: str = "", retry_round: bool = False,
+                    attempt: int = 1) -> Dict:
     """
     解单道题
 
@@ -581,7 +590,8 @@ Flag 数量: {flag_count}
                 _export_challenge_log(unique_code, diff, flag_count, {
                     "success": False, "flag_found": False, "iterations": agent.iteration,
                     "final_message": f"[LLM 配额耗尽: {e}]", "run_log": agent._run_log,
-                }, agent, task, "quota_exhausted", [], [], container_addrs, _challenge_start)
+                }, agent, task, "quota_exhausted", [], [], container_addrs, _challenge_start,
+                    attempt=attempt)
                 raise
             except Exception as e:
                 logger.error(f"❌ {unique_code} 解题异常: {e}")
@@ -751,7 +761,8 @@ Flag 数量: {flag_count}
 
     # ── 导出单题运行日志 ──
     _export_challenge_log(unique_code, diff, flag_count, result, agent, task, status,
-                          found_flags, submit_results, container_addrs, _challenge_start)
+                          found_flags, submit_results, container_addrs, _challenge_start,
+                          attempt=attempt)
 
     print(f"\n[5/5] 完成: {status}")
 
@@ -762,6 +773,8 @@ Flag 数量: {flag_count}
         "submit_results": submit_results,
         # LLM 失败中断标记（熔断统计用：llm_error 非空 = 这道题死于 LLM 服务不可用而非解题失败）
         "llm_error": result.get("llm_error"),
+        # LLM 成功调用次数（0 = 本题一次都没调通，额度/网络不可用的空转，重试熔断统计用）
+        "llm_ok_calls": len(result.get("run_log") or []),
     }
 
 
@@ -905,6 +918,7 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                         retry_inflight = {}
                         retry_idx = 0
                         retry_failed = list(retry_list)
+                        _retry_empty_streak = [0]  # 连续 LLM 零成功调用的题数（熔断用）
 
                         def _retry_fill():
                             nonlocal retry_idx
@@ -920,7 +934,8 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                                     continue
                                 print(f"\n  🔄 重试 {code} ({retry_idx}/{len(retry_failed)})")
                                 f = ex.submit(solve_challenge, challenge, progress,
-                                              retry_hint=_build_deadend_hint(code), retry_round=True)
+                                              retry_hint=_build_deadend_hint(code), retry_round=True,
+                                              attempt=2)
                                 retry_inflight[f] = challenge
                             return retry_idx
 
@@ -931,7 +946,21 @@ def run_tsecbench(timeout_sec: int = 0, start_time: float = 0):
                                 ch = retry_inflight.pop(f)
                                 if _collect(f, ch):
                                     quota_exhausted = True
+                                else:
+                                    # 重试熔断：连续 3 题 LLM 零成功调用（额度耗尽/服务不可用）→
+                                    # 剩余重试题全是空转白等，直接结束重试轮（上轮 24 题×140s = 56 分钟）
+                                    try:
+                                        _r = f.result() or {}
+                                    except Exception:
+                                        _r = {}
+                                    if _r.get("llm_ok_calls", 1) == 0 and _r.get("status") != "solved":
+                                        _retry_empty_streak[0] += 1
+                                    else:
+                                        _retry_empty_streak[0] = 0
                             if not quota_exhausted:
+                                if _retry_empty_streak[0] >= 3:
+                                    print("\n🛑 LLM 连续 3 题零有效调用（额度/服务不可用），重试轮熔断，跳过剩余重试题")
+                                    break
                                 retry_idx = _retry_fill()
                     else:
                         print("\n✅ 所有题目已解决，无需重试。")

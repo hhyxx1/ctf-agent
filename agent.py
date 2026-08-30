@@ -429,6 +429,11 @@ class Agent:
             self.budget.update(budget)
         self.found_flag = False
         self.submitted = False
+        # 平台确认正确的 flag 集合（区别于 found_flag 布尔——b-01 教训：拿到 1 个 flag 后
+        # found_flag 恒 True 把无进展计数器永久喂饱，一道题烧了 202 轮/114 分钟）
+        self.correct_flags: set = set()
+        self._flags_seen = 0  # no_progress 判定快照：只有新 flag 才算进展
+        self._budget_shrunk = False
         self._last_has_tool_calls = False  # 本轮是否调用工具（空转/无进展判定用）
         self._no_flag_rounds = 0  # 连续无 extract_flag/submit_flag 动作的轮数（B1 失败收敛检测）
         self._flag_hint_done = False  # 聚焦提 flag 提示只发一次
@@ -500,6 +505,7 @@ class Agent:
             logger.info(f"自动提交 flag: {flag} → {'成功' if ok else '不正确'}")
             if ok:
                 self.found_flag = True
+                self.correct_flags.add(flag)
                 if not (_mc and _tc and int(_mc.group(1)) < int(_tc.group(1))):
                     self.submitted = True
                     if self._solved_event:
@@ -652,6 +658,8 @@ class Agent:
                 _mc_ok = re.search(r'"correct_flag_count":\s*(\d+)', result_str)
                 if "提交成功" in result_str and _mc_ok is not None and int(_mc_ok.group(1)) > 0:
                     self.found_flag = True
+                    if isinstance(args.get("flag"), str):
+                        self.correct_flags.add(args["flag"].strip())
                     if self._solved_event:
                         self._solved_event.set()
                     # 多 flag 题：提交成功但还有未提交的 flag → 不停止，提示继续找剩余 flag
@@ -778,15 +786,26 @@ class Agent:
                 print("  ⏹️ 其他方向已找到 flag，本方向提前停止")
                 break
             self.iteration += 1
+            # 部分通过止损：拿到 ≥1 个正确 flag 后，剩余预算大幅收缩一次
+            # （b-01 教训：202 轮里 100+ 轮耗在已拿 1 flag 后的无限深挖上）
+            if self.correct_flags and not self._budget_shrunk:
+                self._budget_shrunk = True
+                _remaining = iter_limit - self.iteration
+                iter_limit = self.iteration + max(15, min(40, _remaining // 4))
+                print(f"  ✂️ 已拿到 {len(self.correct_flags)} 个 flag，剩余预算收缩至 {iter_limit - self.iteration} 轮"
+                      f"（优先找剩余 flag，避免单 flag 后无限深挖）")
             # 无进展检测（基于上一轮状态）：「进展」只认 flag 事件（提交正确/extract 命中 → found_flag 置位）。
             # 不再用 _detect_signal 宽松迹象重置计数——之前 web 题读二进制输出里到处是 0x7f、
             # 每几轮写一次 exploit 脚本，计数反复归零，实际跑出 98 轮/790 万 token 的灾难（log c-03）。
             # 阈值按难度动态预算（easy 紧止损省 token，hard 松止损多给机会）
             if self.iteration > 3:
-                if self._last_has_tool_calls and not self.found_flag:
-                    no_progress_rounds += 1
-                else:
+                # 「进展」只认平台确认正确的新 flag（correct_flags 增长），extract 候选/布尔位不算
+                _new_flags = len(self.correct_flags) > self._flags_seen
+                if _new_flags:
+                    self._flags_seen = len(self.correct_flags)
                     no_progress_rounds = 0
+                elif self._last_has_tool_calls:
+                    no_progress_rounds += 1
                 if no_progress_rounds >= self.budget["no_progress_hint"] and not no_progress_advised:
                     no_progress_advised = True
                     no_progress_rounds = 0
